@@ -1,0 +1,20 @@
+[project]
+name = "clawchain"
+version = "0.1.0"
+description = "Execution provenance, recovery, and blockchain anchoring system for ClawChain"
+requires-python = ">=3.12"
+
+[project.scripts]
+clawchain-runtime = "clawchain.runtime_cli:main"
+clawchain-sidecar = "clawchain.runtime.sidecar_service:main"
+clawchain-agent-proxy = "clawchain.agent_proxy_cli:main"
+clawchain-ui = "clawchain.ui_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+
+[tool.setuptools.packages.find]
+include = ["clawchain*"]

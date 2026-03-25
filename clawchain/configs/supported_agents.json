@@ -1,0 +1,84 @@
+{
+  "agents": [
+    {
+      "agent_id": "codex",
+      "display_name": "Codex CLI",
+      "process_patterns": [
+        "codex",
+        "openai codex"
+      ],
+      "integration_mode": "shell-wrapper",
+      "negative_patterns": [
+        "codex-linux-sandbox",
+        "shell_snapshots",
+        "cursor"
+      ]
+    },
+    {
+      "agent_id": "claude-code",
+      "display_name": "Claude Code",
+      "process_patterns": [
+        "claude",
+        "claude code",
+        "@anthropic-ai/claude-code"
+      ],
+      "integration_mode": "shell-wrapper",
+      "negative_patterns": [
+        "claudedb",
+        "claude-desktop",
+        "claude-launcher"
+      ]
+    },
+    {
+      "agent_id": "cursor",
+      "display_name": "Cursor CLI",
+      "process_patterns": [
+        "cursor-agent",
+        "cursor"
+      ],
+      "integration_mode": "tool-proxy",
+      "negative_patterns": [
+        "cursor-theme",
+        "cursors/",
+        "xcursor",
+        "libcursor"
+      ]
+    },
+    {
+      "agent_id": "openclaw",
+      "display_name": "OpenClaw",
+      "process_patterns": [
+        "openclaw"
+      ],
+      "integration_mode": "tool-proxy"
+    },
+    {
+      "agent_id": "openhands",
+      "display_name": "OpenHands",
+      "process_patterns": [
+        "openhands"
+      ],
+      "integration_mode": "runtime-adapter"
+    },
+    {
+      "agent_id": "cline",
+      "display_name": "Cline",
+      "process_patterns": [
+        "cline"
+      ],
+      "integration_mode": "tool-proxy"
+    },
+    {
+      "agent_id": "gemini-cli",
+      "display_name": "Gemini CLI",
+      "process_patterns": [
+        "gemini",
+        "@google/gemini-cli"
+      ],
+      "integration_mode": "shell-wrapper",
+      "negative_patterns": [
+        "google-chrome"
+      ]
+    }
+  ]
+}

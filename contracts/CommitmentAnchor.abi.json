@@ -1,0 +1,141 @@
+[
+  {
+    "type": "function",
+    "name": "anchorCommitment",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "sessionId",
+        "type": "string"
+      },
+      {
+        "name": "batchSeqNo",
+        "type": "uint256"
+      },
+      {
+        "name": "merkleRoot",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "getCommitment",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "commitmentKey",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "sessionId",
+        "type": "string"
+      },
+      {
+        "name": "batchSeqNo",
+        "type": "uint256"
+      },
+      {
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "name": "anchoredAtBlock",
+        "type": "uint256"
+      },
+      {
+        "name": "submitter",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "getCommitmentByParts",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "sessionId",
+        "type": "string"
+      },
+      {
+        "name": "batchSeqNo",
+        "type": "uint256"
+      },
+      {
+        "name": "merkleRoot",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "found",
+        "type": "bool"
+      },
+      {
+        "name": "storedSessionId",
+        "type": "string"
+      },
+      {
+        "name": "storedBatchSeqNo",
+        "type": "uint256"
+      },
+      {
+        "name": "storedMerkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "name": "anchoredAtBlock",
+        "type": "uint256"
+      },
+      {
+        "name": "submitter",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "CommitmentAnchored",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "commitmentKey",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "sessionId",
+        "type": "string",
+        "indexed": false
+      },
+      {
+        "name": "batchSeqNo",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "merkleRoot",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "submitter",
+        "type": "address",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "fallback",
+    "stateMutability": "nonpayable"
+  }
+]

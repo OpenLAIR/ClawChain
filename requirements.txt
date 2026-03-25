@@ -1,0 +1,5 @@
+# Runtime dependencies
+cryptography>=42,<46
+
+# Local validation helpers
+pytest>=8,<9

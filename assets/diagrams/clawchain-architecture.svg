@@ -1,0 +1,93 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="80" x2="1480" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#EEF2FF"/>
+    </linearGradient>
+    <linearGradient id="accentA" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#14B8A6"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="accentB" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="2000" height="1200" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#0F172A" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M1 1L11 6L1 11V1Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="900" rx="36" fill="url(#bg)"/>
+  <text x="800" y="90" text-anchor="middle" fill="#0F172A" font-size="42" font-family="Arial, Helvetica, sans-serif" font-weight="700">ClawChain Architecture</text>
+  <text x="800" y="128" text-anchor="middle" fill="#475569" font-size="20" font-family="Arial, Helvetica, sans-serif">Secure runtime control plane for high-permission AI coding agents</text>
+
+  <g filter="url(#shadow)">
+    <rect x="90" y="182" width="250" height="140" rx="28" fill="white"/>
+    <rect x="90" y="182" width="250" height="140" rx="28" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="215" y="228" text-anchor="middle" fill="#0F172A" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700">Live Agent Sessions</text>
+    <text x="215" y="262" text-anchor="middle" fill="#475569" font-size="18" font-family="Arial, Helvetica, sans-serif">Codex stable today</text>
+    <text x="215" y="290" text-anchor="middle" fill="#64748B" font-size="16" font-family="Arial, Helvetica, sans-serif">Claude Code / Gemini / Cursor</text>
+
+    <rect x="390" y="182" width="250" height="140" rx="28" fill="white"/>
+    <rect x="390" y="182" width="250" height="140" rx="28" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="515" y="228" text-anchor="middle" fill="#0F172A" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700">Controlled Launcher</text>
+    <text x="515" y="262" text-anchor="middle" fill="#475569" font-size="18" font-family="Arial, Helvetica, sans-serif">Join Monitor</text>
+    <text x="515" y="290" text-anchor="middle" fill="#64748B" font-size="16" font-family="Arial, Helvetica, sans-serif">Copy Resume Command</text>
+
+    <rect x="690" y="182" width="250" height="140" rx="28" fill="white"/>
+    <rect x="690" y="182" width="250" height="140" rx="28" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="815" y="228" text-anchor="middle" fill="#0F172A" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700">Danger Detection</text>
+    <text x="815" y="262" text-anchor="middle" fill="#475569" font-size="18" font-family="Arial, Helvetica, sans-serif">Restorable: Delete / Remove</text>
+    <text x="815" y="290" text-anchor="middle" fill="#64748B" font-size="16" font-family="Arial, Helvetica, sans-serif">Audit-only for the rest</text>
+
+    <rect x="990" y="182" width="250" height="140" rx="28" fill="white"/>
+    <rect x="990" y="182" width="250" height="140" rx="28" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="1115" y="228" text-anchor="middle" fill="#0F172A" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700">Recovery &amp; Proof</text>
+    <text x="1115" y="262" text-anchor="middle" fill="#475569" font-size="18" font-family="Arial, Helvetica, sans-serif">Snapshot · Impact-set</text>
+    <text x="1115" y="290" text-anchor="middle" fill="#64748B" font-size="16" font-family="Arial, Helvetica, sans-serif">Receipt · Submission · Proof JSON</text>
+
+    <rect x="1290" y="182" width="220" height="140" rx="28" fill="white"/>
+    <rect x="1290" y="182" width="220" height="140" rx="28" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="1400" y="228" text-anchor="middle" fill="#0F172A" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700">Chain Verify</text>
+    <text x="1400" y="262" text-anchor="middle" fill="#475569" font-size="18" font-family="Arial, Helvetica, sans-serif">Merkle root</text>
+    <text x="1400" y="290" text-anchor="middle" fill="#64748B" font-size="16" font-family="Arial, Helvetica, sans-serif">EVM anchor backend</text>
+  </g>
+
+  <path d="M340 252H390" stroke="#475569" stroke-width="6" marker-end="url(#arrow)"/>
+  <path d="M640 252H690" stroke="#475569" stroke-width="6" marker-end="url(#arrow)"/>
+  <path d="M940 252H990" stroke="#475569" stroke-width="6" marker-end="url(#arrow)"/>
+  <path d="M1240 252H1290" stroke="#475569" stroke-width="6" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="145" y="460" width="330" height="230" rx="32" fill="white"/>
+    <rect x="145" y="460" width="330" height="230" rx="32" stroke="#CBD5E1" stroke-width="2"/>
+    <rect x="171" y="490" width="278" height="44" rx="16" fill="url(#accentA)"/>
+    <text x="310" y="520" text-anchor="middle" fill="white" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700">UI &amp; Session Control</text>
+    <text x="181" y="572" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• Dashboard</text>
+    <text x="181" y="608" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• Session Detail</text>
+    <text x="181" y="644" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• Dangerous Operation History</text>
+
+    <rect x="545" y="460" width="330" height="230" rx="32" fill="white"/>
+    <rect x="545" y="460" width="330" height="230" rx="32" stroke="#CBD5E1" stroke-width="2"/>
+    <rect x="571" y="490" width="278" height="44" rx="16" fill="url(#accentB)"/>
+    <text x="710" y="520" text-anchor="middle" fill="white" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700">Local Evidence Vault</text>
+    <text x="581" y="572" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• recovery-vault snapshots</text>
+    <text x="581" y="608" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• receipts / submissions</text>
+    <text x="581" y="644" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• encrypted proof archive</text>
+
+    <rect x="945" y="460" width="510" height="230" rx="32" fill="white"/>
+    <rect x="945" y="460" width="510" height="230" rx="32" stroke="#CBD5E1" stroke-width="2"/>
+    <rect x="971" y="490" width="458" height="44" rx="16" fill="#0F172A"/>
+    <text x="1200" y="520" text-anchor="middle" fill="white" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700">Core Outcomes</text>
+    <text x="981" y="572" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• destructive delete captured with evidence</text>
+    <text x="981" y="608" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• restore available for monitored delete path</text>
+    <text x="981" y="644" fill="#334155" font-size="18" font-family="Arial, Helvetica, sans-serif">• chain-verifiable session proof and provenance</text>
+  </g>
+
+  <path d="M515 322V430H310V460" stroke="#64748B" stroke-width="5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M1115 322V430H710V460" stroke="#64748B" stroke-width="5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M1400 322V430H1200V460" stroke="#64748B" stroke-width="5" fill="none" marker-end="url(#arrow)"/>
+</svg>
