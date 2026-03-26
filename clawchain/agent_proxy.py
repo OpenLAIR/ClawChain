@@ -295,15 +295,21 @@ def _expand_existing_targets(expanded: list[Path]) -> list[Path]:
     for path in expanded:
         if not path.exists():
             continue
-        candidates = [path]
-        if path.is_dir():
-            file_children = [child for child in sorted(path.rglob("*")) if child.is_file()]
-            candidates = file_children or [path]
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            result.append(candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
+
+
+def _dedupe_target_paths(expanded: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in expanded:
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
     return result
 
 
@@ -314,8 +320,9 @@ def _command_tokens_and_text(cmd: list[str] | tuple[str, ...] | str | object) ->
     text = str(cmd or "").strip()
     if not text:
         return [], ""
+    looks_windows = bool(re.search(r"[A-Za-z]:\\", text)) or ("\\" in text and os.name != "nt")
     try:
-        tokens = shlex.split(text, posix=(os.name != "nt"))
+        tokens = shlex.split(text, posix=(False if looks_windows else (os.name != "nt")))
     except ValueError:
         tokens = text.split()
     return [str(part) for part in tokens], text
@@ -342,22 +349,39 @@ def _resolve_powershell_variable(*, command_text: str, token: str) -> str:
     return str(match.group("value") or "").strip().strip("'\"")
 
 
+def _extract_powershell_remove_item_target(command_text: str) -> str | None:
+    tokens, _ = _command_tokens_and_text(command_text)
+    lowered = [str(token).lower() for token in tokens]
+    for index, token in enumerate(lowered):
+        if Path(tokens[index]).name.lower() != "remove-item":
+            continue
+        probe = index + 1
+        while probe < len(tokens):
+            current = str(tokens[probe])
+            current_lower = current.lower()
+            if current_lower in {"-path", "-literalpath"} and probe + 1 < len(tokens):
+                return _resolve_powershell_variable(command_text=command_text, token=str(tokens[probe + 1]))
+            if current.startswith("-"):
+                probe += 1
+                continue
+            return _resolve_powershell_variable(command_text=command_text, token=current)
+        return None
+    return None
+
+
 def _infer_target_paths_from_text(command_text: str, *, cwd: Path | None) -> list[Path]:
     text = str(command_text or "").strip()
     if not text:
         return []
     cwd = cwd or Path.cwd()
-    remove_item_match = re.search(
-        r"(?i)\bRemove-Item\b.*?-(?:LiteralPath|Path)\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)",
-        text,
-    )
-    if remove_item_match is not None:
-        target = _resolve_powershell_variable(command_text=text, token=remove_item_match.group("path"))
-        return _expand_existing_targets([_resolve_candidate_path(target, cwd=cwd)])
+    remove_item_target = _extract_powershell_remove_item_target(text)
+    if remove_item_target is not None:
+        target = remove_item_target
+        return _dedupe_target_paths([_resolve_candidate_path(target, cwd=cwd)])
     delete_match = re.search(r"(?i)\b(?:del|erase)\b\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)", text)
     if delete_match is not None:
         target = _resolve_powershell_variable(command_text=text, token=delete_match.group("path"))
-        return _expand_existing_targets([_resolve_candidate_path(target, cwd=cwd)])
+        return _dedupe_target_paths([_resolve_candidate_path(target, cwd=cwd)])
     tokens, _ = _command_tokens_and_text(text)
     lowered_tokens = [token.lower() for token in tokens]
     if tokens:
@@ -390,8 +414,7 @@ def _infer_target_paths(cmd: list[str] | tuple[str, ...] | str | object, *, cwd:
                 expanded.extend(path for path in cwd.glob(part) if path.exists())
             else:
                 path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
-                if path.exists():
-                    expanded.append(path)
+                expanded.append(path)
     elif command_name == "git" and (tokens[1:3] == ["reset", "--hard"] or tokens[1:2] == ["clean"]):
         expanded.append(cwd.resolve())
     elif command_name == "find" and "-delete" in lowered:
@@ -399,9 +422,8 @@ def _infer_target_paths(cmd: list[str] | tuple[str, ...] | str | object, *, cwd:
             if part.startswith("-"):
                 break
             path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
-            if path.exists():
-                expanded.append(path)
-    return _expand_existing_targets(expanded)
+            expanded.append(path)
+    return _dedupe_target_paths(expanded)
 
 
 def _infer_referenced_paths_from_text(command_text: str, *, cwd: Path | None) -> list[Path]:
@@ -1607,13 +1629,21 @@ class TransparentAgentProxy:
             decision="allow" if policy_gate.allowed else "deny",
         )
         target_paths = _infer_tool_target_paths(tool_name=tool_name, params=observed_params, cwd=cwd)
+        recovery_targets = _expand_recovery_targets([path for path in target_paths if path.exists()])
+        if not recovery_targets:
+            seen_targets: set[Path] = set()
+            for target in target_paths:
+                if target in seen_targets:
+                    continue
+                seen_targets.add(target)
+                recovery_targets.append(target)
         protections = self._plan_protections(
             session_id=session_id,
             run_id=run_id,
             actor_id=actor_id,
             tool_name=tool_name,
             params=observed_params,
-            target_paths=_expand_recovery_targets([path for path in target_paths if path.exists()]),
+            target_paths=recovery_targets,
         )
         self._start_tool_execution(
             session_id=session_id,

@@ -61,7 +61,7 @@ class CodexRolloutWatcher:
     run_id: str
     actor_id: str = "codex"
     workspace_root: Path | None = None
-    poll_interval_sec: float = 0.2
+    poll_interval_sec: float = 0.05
     _offsets: dict[str, int] = field(default_factory=dict)
     _file_cwds: dict[str, str | None] = field(default_factory=dict)
     _seeded: bool = False
@@ -154,7 +154,7 @@ def start_codex_rollout_watcher(
     run_id: str,
     actor_id: str = "codex",
     workspace_root: Path | None = None,
-    poll_interval_sec: float = 0.2,
+    poll_interval_sec: float = 0.05,
 ) -> tuple[threading.Event, threading.Thread]:
     watcher = CodexRolloutWatcher(
         proxy=proxy,

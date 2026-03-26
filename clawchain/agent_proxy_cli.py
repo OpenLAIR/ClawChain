@@ -43,6 +43,7 @@ from .runtime.anchor import (
 )
 from .runtime.recovery import RecoveryCatalogStore, RecoveryImpactSetCatalogStore
 from .runtime.recovery import RecoveryPlan, RecoveryProtectionBundle
+from .runtime.recovery import recovery_impact_set_record_from_dict
 from .session_state import SessionRegistryEntry, SessionState, detect_stale_pids, is_pid_alive, resolve_state_from_registry, safe_transition
 from .system import ClawChainPaths
 
@@ -564,21 +565,22 @@ def _collect_registry_review_entries(*, account_id: str, root_dir: Path | None =
             continue
         impact_sets: list[dict[str, object]]
         if base_dir:
-            catalog = RecoveryImpactSetCatalogStore(
-                Path(str(base_dir)).expanduser() / "runtime" / "local" / "recovery-impact-sets.jsonl"
-            )
-            impact_sets = [
-                {
-                    "impact_set_id": record.impact_set_id,
-                    "created_ts_ms": record.created_ts_ms,
-                    "target_root": record.target_root,
-                    "risk_reason": record.risk_reason,
-                    "recovery_ids": tuple(record.recovery_ids),
-                }
-                for record in catalog.read_all()
-                if record.session_id == session_id
-            ]
-            impact_sets.sort(key=lambda item: int(item["created_ts_ms"]), reverse=True)
+            catalog_path = Path(str(base_dir)).expanduser() / "runtime" / "local" / "recovery-impact-sets.jsonl"
+            if catalog_path.exists():
+                impact_sets = [
+                    {
+                        "impact_set_id": record.impact_set_id,
+                        "created_ts_ms": record.created_ts_ms,
+                        "target_root": record.target_root,
+                        "risk_reason": record.risk_reason,
+                        "recovery_ids": tuple(record.recovery_ids),
+                    }
+                    for record in _read_recovery_impact_sets_readonly(catalog_path)
+                    if record.session_id == session_id
+                ]
+                impact_sets.sort(key=lambda item: int(item["created_ts_ms"]), reverse=True)
+            else:
+                impact_sets = []
         else:
             try:
                 proxy = TransparentAgentProxy.create(stored.to_proxy_config())
@@ -604,6 +606,22 @@ def _collect_registry_review_entries(*, account_id: str, root_dir: Path | None =
             )
     entries.sort(key=lambda item: int(item.get("created_ts_ms") or 0), reverse=True)
     return entries
+
+
+def _read_recovery_impact_sets_readonly(catalog_path: Path) -> list[object]:
+    if not catalog_path.exists():
+        return []
+    rows: list[object] = []
+    try:
+        with catalog_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                payload = str(line or "").strip()
+                if not payload:
+                    continue
+                rows.append(recovery_impact_set_record_from_dict(json.loads(payload)))
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
 
 def _load_json_rows_for_proof(path: Path) -> list[dict[str, object]]:
     if not path.exists():
@@ -838,6 +856,12 @@ def _build_proof_card(entry: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _preferred_recovery_source(protection: RecoveryProtectionBundle) -> str | None:
+    if any(plan.source_kind == "snapshot" for plan in protection.plans):
+        return "snapshot"
+    return protection.primary_source_kind()
+
+
 
 def _default_chain_manifest_path(account_id: str, *, root_dir: Path | None = None) -> Path:
     return _default_account_root(account_id, root_dir=root_dir) / "_internal" / "chain" / "deployment.json"
@@ -998,12 +1022,10 @@ def _collect_chain_cards(
         configured_session_id = str(getattr(stored, 'default_session_id', '') or '')
         if not base_dir or not configured_session_id:
             continue
-        catalog = RecoveryImpactSetCatalogStore(
+        impact_rows = _read_recovery_impact_sets_readonly(
             Path(str(base_dir)).expanduser() / 'runtime' / 'local' / 'recovery-impact-sets.jsonl'
         )
-        try:
-            impact_rows = list(catalog.read_all())
-        except Exception:  # noqa: BLE001
+        if not impact_rows:
             continue
         agent_id = config_path.parent.parent.name if config_path.parent.parent != config_path.parent else '-'
         for record in impact_rows:
@@ -3926,7 +3948,7 @@ def main(argv: list[str] | None = None) -> int:
             restored_targets: list[str] = []
             verified_targets: list[str] = []
             for protection in protections:
-                preferred = "snapshot" if protection.target_path.name == ".git" else protection.primary_source_kind()
+                preferred = _preferred_recovery_source(protection)
                 restored, started, completed = proxy.system.execute_recovery_with_audit(
                     protection=protection,
                     preferred_source=preferred,
@@ -4121,6 +4143,44 @@ def main(argv: list[str] | None = None) -> int:
         log_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = log_dir / "agent-proxy.out.log"
         stderr_path = log_dir / "agent-proxy.err.log"
+        state_path = stored.service_state_path()
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                state = None
+            pid = int((state or {}).get("pid") or 0)
+            running = False
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    running = True
+                except OSError:
+                    running = False
+            if running and isinstance(state, dict):
+                ping_ok = False
+                if not state.get("socket_path"):
+                    ping_ok = True
+                else:
+                    try:
+                        ping_ok = bool(AgentProxyDaemonClient(Path(str(state["socket_path"]))).ping().get("ok"))
+                    except Exception:  # noqa: BLE001
+                        ping_ok = False
+                print(json.dumps({
+                    "ok": True,
+                    "already_running": True,
+                    "spawned_pid": pid,
+                    "state_path": str(state_path),
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "ping_ok": ping_ok,
+                    "service": state,
+                }, ensure_ascii=True, indent=2))
+                return 0
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
         python_exec = os.environ.get("PYTHON", sys.executable)
         with stdout_path.open("a", encoding="utf-8") as stdout_file, stderr_path.open("a", encoding="utf-8") as stderr_file:
             process = subprocess.Popen(
@@ -4131,7 +4191,6 @@ def main(argv: list[str] | None = None) -> int:
                 start_new_session=True,
                 close_fds=True,
             )
-        state_path = stored.service_state_path()
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if state_path.exists():

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -93,6 +94,36 @@ def _resolve_path(path_text: str, *, default_cwd: str | None) -> str:
     return str((Path(default_cwd) / path).resolve())
 
 
+def _command_tokens(command_text: str) -> list[str]:
+    text = str(command_text or "").strip()
+    if not text:
+        return []
+    looks_windows = bool(re.search(r"[A-Za-z]:\\", text)) or ("\\" in text and os.name != "nt")
+    try:
+        return [str(token) for token in shlex.split(text, posix=(False if looks_windows else (os.name != "nt")))]
+    except ValueError:
+        return text.split()
+
+
+def _resolve_powershell_remove_item_target(*, command_text: str) -> str | None:
+    tokens = _command_tokens(command_text)
+    for index, token in enumerate(tokens):
+        if Path(str(token)).name.lower() != "remove-item":
+            continue
+        probe = index + 1
+        while probe < len(tokens):
+            current = str(tokens[probe])
+            current_lower = current.lower()
+            if current_lower in {"-path", "-literalpath"} and probe + 1 < len(tokens):
+                return _resolve_powershell_target(command_text=command_text, token=str(tokens[probe + 1]))
+            if current.startswith("-"):
+                probe += 1
+                continue
+            return _resolve_powershell_target(command_text=command_text, token=current)
+        return None
+    return None
+
+
 def normalize_rollout_tool_call(
     tool_name: str,
     arguments_text: str,
@@ -140,38 +171,35 @@ def _resolve_powershell_target(*, command_text: str, token: str) -> str:
 
 
 def extract_risky_target_root(cmd_text: str) -> str:
+    target_path = extract_risky_target_path(cmd_text)
+    if target_path:
+        return Path(target_path).name or target_path
+    return "-"
+
+
+def extract_risky_target_path(cmd_text: str, *, default_cwd: str | None = None) -> str:
     text = str(cmd_text or "").strip()
     if not text:
-        return "-"
-    remove_item_match = re.search(
-        r"(?i)\bRemove-Item\b.*?-(?:LiteralPath|Path)\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)",
-        text,
-    )
-    if remove_item_match is not None:
-        target = _resolve_powershell_target(command_text=text, token=remove_item_match.group("path"))
-        return Path(target).name or target
+        return ""
+    remove_item_target = _resolve_powershell_remove_item_target(command_text=text)
+    if remove_item_target is not None:
+        return _resolve_path(remove_item_target, default_cwd=default_cwd)
     delete_match = re.search(r"(?i)\b(?:del|erase)\b\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)", text)
     if delete_match is not None:
         target = _resolve_powershell_target(command_text=text, token=delete_match.group("path"))
-        return Path(target).name or target
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        tokens = text.split()
+        return _resolve_path(target, default_cwd=default_cwd)
+    tokens = _command_tokens(text)
     target = ""
     for token in reversed(tokens):
         if token.startswith("-"):
             continue
-        if token in {"rm", "mv", "find", "chmod", "chown", "git"}:
+        if token.lower() in {"rm", "mv", "find", "chmod", "chown", "git", "write-output", "write-host", "echo", "printf"}:
             continue
         target = token
         break
     if not target:
-        return "-"
-    try:
-        return Path(target).name or target
-    except Exception:
-        return target
+        return ""
+    return _resolve_path(target, default_cwd=default_cwd)
 
 
 def read_rollout_updates(
@@ -248,6 +276,7 @@ __all__ = [
     "CodexRolloutObservation",
     "CodexRolloutSessionMeta",
     "codex_rollout_paths",
+    "extract_risky_target_path",
     "extract_risky_target_root",
     "normalize_rollout_tool_call",
     "parse_iso_timestamp_ms",

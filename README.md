@@ -64,7 +64,7 @@ The current stable system is intentionally narrow and reliable.
 ### Stable Today
 
 - **Codex** is the primary supported end-to-end path
-- `Join Monitor` + `Copy Resume Command` are the main onboarding flow
+- `Join Monitor` is the main onboarding flow; `Copy Resume Command` is optional when you later want to reopen the same monitored session
 - delete detection, snapshot-backed recovery, proof export, and chain verification are working together
 
 ### In Progress
@@ -215,13 +215,15 @@ In the UI:
 1. find the new session card
 2. open `Session Detail`
 3. click `Join Monitor`
-4. click `Copy Resume Command`
+4. optionally click `Copy Resume Command` if you want a reusable monitored resume command for later
 
-`Join Monitor` now starts the per-session ClawChain background service by default. If that service is missing, the monitored session can still appear in the UI, but it will fall back to history-only records instead of producing recoverable proof artifacts.
+`Join Monitor` now starts the per-session ClawChain background service by default and keeps the current Codex terminal in place. It does not open extra terminals automatically. If that service is missing, the monitored session can still appear in the UI, but it will fall back to history-only records instead of producing recoverable proof artifacts.
 
-### Step 3. Enter the controlled session
+### Step 3. Continue in the same session
 
-Run the copied command in a terminal. That command re-enters the same session through the controlled runtime path.
+Keep using the same Codex session after `Join Monitor` completes. New dangerous operations are captured in place by the background rollout watcher.
+
+If you later close that terminal and want to reopen the same monitored session, use `Copy Resume Command`.
 
 Platform-specific note:
 
@@ -230,9 +232,9 @@ Platform-specific note:
 
 ### Step 4. Perform a delete action
 
-Run a delete action from inside the controlled session.
+Run a delete action from inside the already-joined session.
 
-Important: perform the delete only after `Join Monitor` has completed and the copied resume command has relaunched the session through the monitored launcher. That is what allows the rollout watcher to capture the dangerous tool call and build a recoverable proof package.
+Important: perform the delete only after `Join Monitor` has completed. That is what allows the background watcher to capture the dangerous tool call and build a recoverable proof package.
 
 ### Step 5. Validate the result
 
@@ -335,7 +337,7 @@ A clean installation is considered healthy if all of these succeed:
 2. `pip install -r requirements.txt && pip install -e .`
 3. start the UI on port `8888`
 4. onboard a Codex session with `Join Monitor`
-5. enter the controlled session through the copied resume command
+5. keep working in the same joined session, or optionally use the copied resume command later
 6. perform one delete
 7. see a restorable delete record in `Dangerous Operations`
 8. restore the deleted target

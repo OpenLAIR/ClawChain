@@ -535,7 +535,7 @@ class ClawChainSystem:
         if self.recovery_repository is None or self.key_pair is None:
             return None
         risky, risk_reason = looks_like_risky_action(tool_name=tool_name, params=params)
-        if not risky or not target_path.exists():
+        if not risky:
             return None
         requested_sources = sources or self.config.risky_action_recovery_sources
         plans = []
@@ -551,7 +551,7 @@ class ClawChainSystem:
             )
             if git_plan is not None:
                 plans.append(git_plan)
-        if "snapshot" in selected_sources:
+        if target_path.exists() and "snapshot" in selected_sources:
             snapshot_source = self._snapshot_source_for_target(target_path, risk_reason=risk_reason)
             plans.append(
                 self.recovery_repository.create_snapshot_plan(

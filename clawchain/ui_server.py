@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import agent_proxy_cli
-from .agent_proxy import AgentProxyPaths
+from .agent_proxy import AgentProxyPaths, TransparentAgentProxy
 from . import codex_rollout
 from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents
 from .platform_support import (
@@ -875,7 +875,7 @@ def render_index_html() -> str:
       }
       pushToast(result.message || 'Monitor join complete.', result.ok ? 'good' : 'warn');
       if (result.ok) {
-        pushToast('Use Copy Resume Command to enter the monitored session path for full snapshot recovery.', 'warn');
+        pushToast('This session stays in its current terminal. New dangerous operations will now be captured in place.', 'good');
       }
       await refreshAll();
       await loadHistory();
@@ -993,7 +993,7 @@ def render_index_html() -> str:
             <span class="pill">${escapeHtml(item.time_label)}</span>
             <span class="pill good">${escapeHtml(item.recovery_count)} recovery</span>
             <span class="pill ${item.risk_class === 'restorable' ? 'good' : 'warn'}">${escapeHtml(item.risk_class || 'audit-only')}</span><span class="pill ${item.restored ? 'good' : ''}">${escapeHtml(item.restored_label || 'available')}</span>
-            ${item.source === 'codex-log-fallback' ? '<span class="pill warn">fallback log</span>' : ''}
+            ${String(item.source || '').includes('fallback') ? '<span class="pill warn">fallback log</span>' : ''}
           </div>
           <div class="meta">impact set ${escapeHtml(item.impact_set_id || '-')}</div>
         </div>
@@ -1022,6 +1022,8 @@ def render_index_html() -> str:
 
     function describeControlState(detail) {
       const state = String(detail?.control_state || detail?.status || 'unmanaged');
+      const captureMode = String(detail?.capture_mode || '');
+      if (captureMode === 'rollout-observed') return 'This session is being monitored in place. ClawChain is watching the live Codex rollout stream, so dangerous operations can be captured without opening another terminal.';
       if (state === 'pending') return 'Prepared for monitoring. Run the generated safe handoff command in a terminal; it will keep your shell open and print how to attach.';
       if (state === 'routed') return 'This session is routed through ClawChain. Use the attach command below to enter the controlled terminal.';
       if (state === 'attached') return 'This controlled session is live and currently attached through tmux.';
@@ -1082,7 +1084,7 @@ def render_index_html() -> str:
           <div><strong>[${item.index}] ${escapeHtml(item.summary)}</strong></div>
           <div class="meta">${escapeHtml(item.time_label)} | ${escapeHtml(item.risk_label || item.risk_reason)}</div>
           <div class="row" style="margin-top:10px;">
-            <button class="good" ${item.restore_disabled ? "disabled" : ""} onclick='restoreItem(${item.index}, ${JSON.stringify(String(item.session_id || ""))}, ${JSON.stringify(String(item.impact_set_id || ""))}, ${JSON.stringify(String(item.config_path || ""))})'>${item.restore_disabled ? (item.risk_class === "audit-only" ? "Audit Only" : (item.source === "codex-log-fallback" ? "No Snapshot" : "Restored")) : "Restore"}</button>
+            <button class="good" ${item.restore_disabled ? "disabled" : ""} onclick='restoreItem(${item.index}, ${JSON.stringify(String(item.session_id || ""))}, ${JSON.stringify(String(item.impact_set_id || ""))}, ${JSON.stringify(String(item.config_path || ""))})'>${item.restore_disabled ? (item.risk_class === "audit-only" ? "Audit Only" : (String(item.source || "").includes("fallback") ? "No Snapshot" : (item.restored ? "Restored" : "Unavailable"))) : "Restore"}</button>
           </div>
         </div>
       `);
@@ -1247,7 +1249,8 @@ def _collect_codex_rollout_dangerous_history(*, session_id: str, session_name: s
             cmd_text = str(params.get("cmd") or params.get("command") or params.get("path") or "").strip()
             if not cmd_text:
                 continue
-            target_root = _extract_risky_target_root(cmd_text)
+            target_path = codex_rollout.extract_risky_target_path(cmd_text, default_cwd=item.cwd)
+            target_root = Path(target_path).name if target_path else _extract_risky_target_root(cmd_text)
             rows.append({
                 "session_id": session_id,
                 "session_name": session_name,
@@ -1270,9 +1273,252 @@ def _collect_codex_rollout_dangerous_history(*, session_id: str, session_name: s
                 "restore_disabled": True,
                 "evidence": {},
                 "source": "codex-rollout-fallback",
+                "target_path": target_path or None,
             })
-    rows.sort(key=lambda row: int(row.get("created_ts_ms") or 0), reverse=True)
-    return rows[: max(limit, 0)]
+    deduped: list[dict[str, object]] = []
+    for item in rows:
+        deduped = _merge_history_rows(base=deduped, extra=[item])
+    deduped.sort(key=lambda row: int(row.get("created_ts_ms") or 0), reverse=True)
+    return deduped[: max(limit, 0)]
+
+
+_HISTORY_DUP_WINDOW_MS = 15_000
+
+
+def _history_identity_value(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _history_is_fallback(item: dict[str, object]) -> bool:
+    return str(item.get("source") or "").endswith("fallback")
+
+
+def _history_target_parts(item: dict[str, object]) -> set[str]:
+    target = str(item.get("target_root") or "").strip()
+    if not target:
+        return set()
+    parts = {target.lower()}
+    try:
+        path = Path(target)
+        parts.update(str(part).strip().lower() for part in path.parts if str(part).strip())
+        name = path.name.strip().lower()
+        if name:
+            parts.add(name)
+    except Exception:
+        pass
+    return parts
+
+
+def _history_fallback_scope_matches(fallback: dict[str, object], preferred: dict[str, object]) -> bool:
+    if not _history_is_fallback(fallback) or _history_is_fallback(preferred):
+        return False
+    fallback_target = _history_identity_value(fallback.get("target_root"))
+    if not fallback_target:
+        return False
+    return fallback_target in _history_target_parts(preferred)
+
+
+def _history_scope_merged(preferred: dict[str, object], secondary: dict[str, object]) -> dict[str, object]:
+    if not _history_fallback_scope_matches(secondary, preferred):
+        return preferred
+    merged = dict(preferred)
+    if secondary.get("target_root"):
+        merged["target_root"] = secondary.get("target_root")
+    if secondary.get("summary"):
+        merged["summary"] = secondary.get("summary")
+    return merged
+
+
+def _history_rows_equivalent(left: dict[str, object], right: dict[str, object], *, window_ms: int = _HISTORY_DUP_WINDOW_MS) -> bool:
+    if _history_identity_value(left.get("session_id")) != _history_identity_value(right.get("session_id")):
+        return False
+    if _history_identity_value(left.get("risk_reason")) != _history_identity_value(right.get("risk_reason")):
+        return False
+    left_target = _history_identity_value(left.get("target_root"))
+    right_target = _history_identity_value(right.get("target_root"))
+    left_summary = _history_identity_value(left.get("summary"))
+    right_summary = _history_identity_value(right.get("summary"))
+    scope_match = (
+        (left_target and right_target and left_target == right_target)
+        or (left_summary and right_summary and left_summary == right_summary)
+        or _history_fallback_scope_matches(left, right)
+        or _history_fallback_scope_matches(right, left)
+    )
+    if not scope_match:
+        return False
+    left_ts = int(left.get("created_ts_ms") or 0)
+    right_ts = int(right.get("created_ts_ms") or 0)
+    return abs(left_ts - right_ts) <= max(window_ms, 0)
+
+
+def _history_row_rank(item: dict[str, object]) -> tuple[int, int, int]:
+    recovery_count = int(item.get("recovery_count") or 0)
+    has_impact_set = 1 if str(item.get("impact_set_id") or "").strip() else 0
+    is_fallback = 0 if str(item.get("source") or "").endswith("fallback") else 1
+    return (recovery_count, has_impact_set, is_fallback)
+
+
+def _merge_history_rows(*, base: list[dict[str, object]], extra: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged = list(base)
+    for candidate in extra:
+        replacement_index = None
+        for index, current in enumerate(merged):
+            if not _history_rows_equivalent(current, candidate):
+                continue
+            if _history_row_rank(candidate) > _history_row_rank(current):
+                merged_candidate = _history_scope_merged(candidate, current)
+                replacement_index = index
+                candidate = merged_candidate
+            else:
+                merged[index] = _history_scope_merged(current, candidate)
+                replacement_index = -1
+            break
+        if replacement_index is None:
+            merged.append(candidate)
+        elif replacement_index >= 0:
+            merged[replacement_index] = candidate
+    return merged
+
+
+def _readonly_impact_set_records(path: Path) -> list[object]:
+    if not path.exists():
+        return []
+    rows: list[object] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                payload = str(line or "").strip()
+                if not payload:
+                    continue
+                rows.append(recovery_runtime.recovery_impact_set_record_from_dict(json.loads(payload)))
+    except Exception:
+        return []
+    return rows
+
+
+def _session_event_chain_state(*, event_store_path: Path, session_id: str) -> tuple[int, str | None]:
+    next_index = 0
+    last_hash: str | None = None
+    if not event_store_path.exists():
+        return next_index, last_hash
+    try:
+        with event_store_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                payload = str(line or "").strip()
+                if not payload:
+                    continue
+                row = json.loads(payload)
+                if str(row.get("session_id") or "") != session_id:
+                    continue
+                try:
+                    event_index = int(row.get("event_index") or 0)
+                except (TypeError, ValueError):
+                    continue
+                next_index = max(next_index, event_index + 1)
+                last_hash = str(row.get("event_hash") or "").strip() or last_hash
+    except Exception:
+        return 0, None
+    return next_index, last_hash
+
+
+def _path_identity_value(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = os.path.normcase(os.path.normpath(text))
+    return normalized.lower()
+
+
+def _backfill_codex_rollout_recovery(*, row: dict[str, object]) -> bool:
+    if str(row.get("agent_id") or "") != "codex":
+        return False
+    session_id = str(row.get("session_id") or "").strip()
+    config_path = Path(str(row.get("config_path") or "")).expanduser()
+    if not session_id or not config_path.exists():
+        return False
+    try:
+        stored = agent_proxy_cli.load_agent_proxy_config(config_path)
+    except Exception:
+        return False
+    base_dir = Path(str(getattr(stored, "base_dir", "") or "")).expanduser()
+    if not base_dir:
+        return False
+    runtime_local = base_dir / "runtime" / "local"
+    impact_catalog_path = runtime_local / "recovery-impact-sets.jsonl"
+    event_store_path = runtime_local / "events.jsonl"
+    existing = _readonly_impact_set_records(impact_catalog_path)
+    try:
+        proxy = TransparentAgentProxy.create(stored.to_proxy_config())
+    except Exception:
+        return False
+    changed = False
+    try:
+        next_index, parent_hash = _session_event_chain_state(
+            event_store_path=event_store_path,
+            session_id=session_id,
+        )
+        proxy._session_next_index[session_id] = next_index
+        proxy._session_last_hash[session_id] = parent_hash
+        for rollout_path in _codex_rollout_paths(session_id):
+            meta = codex_rollout.read_rollout_session_meta(rollout_path)
+            items, _offset, _cwd = codex_rollout.read_rollout_updates(
+                rollout_path,
+                start_offset=0,
+                default_cwd=meta.cwd if meta is not None else None,
+            )
+            for item in items:
+                if item.kind != "function_call" or not item.tool_name:
+                    continue
+                params = dict(item.params or {})
+                risky, risk_reason = recovery_runtime.looks_like_risky_action(tool_name=item.tool_name, params=params)
+                if not risky:
+                    continue
+                cmd_text = str(params.get("cmd") or params.get("command") or params.get("path") or "").strip()
+                target_path_text = codex_rollout.extract_risky_target_path(cmd_text, default_cwd=item.cwd)
+                if not target_path_text:
+                    continue
+                target_path = Path(target_path_text)
+                if any(
+                    record.session_id == session_id
+                    and record.risk_reason == risk_reason
+                    and _path_identity_value(record.target_root) == _path_identity_value(target_path)
+                    for record in existing
+                ):
+                    continue
+                protection, event, _receipt = proxy.system.plan_recovery(
+                    session_id=session_id,
+                    run_id=stored.default_run_id,
+                    event_index=next_index,
+                    timestamp_ms=item.timestamp_ms or int(time.time() * 1000),
+                    actor_id="codex-rollout-backfill",
+                    target_path=target_path,
+                    tool_name=item.tool_name,
+                    params=params,
+                    parent_event_hash=parent_hash,
+                    sources=("git",),
+                )
+                if protection is None:
+                    continue
+                if event is not None:
+                    next_index += 1
+                    parent_hash = event.event_hash
+                record = proxy.system.record_recovery_impact_set(
+                    session_id=session_id,
+                    target_root=target_path,
+                    risk_reason=risk_reason,
+                    protections=(protection,),
+                )
+                if record is not None:
+                    existing.append(record)
+                    changed = True
+        if changed:
+            proxy._session_next_index[session_id] = next_index
+            proxy._session_last_hash[session_id] = parent_hash
+            proxy.system.flush()
+            proxy.system.poll_anchor_submissions()
+    finally:
+        proxy.close()
+    return changed
 
 
 def _collect_codex_sqlite_dangerous_history(*, session_id: str, session_name: str, config_path: str | None = None, limit: int = 50) -> list[dict[str, object]]:
@@ -1311,7 +1557,8 @@ def _collect_codex_sqlite_dangerous_history(*, session_id: str, session_name: st
             if not risky:
                 continue
             cmd_text = str(params.get('cmd') or params.get('command') or '').strip()
-            target_root = _extract_risky_target_root(cmd_text)
+            target_path = codex_rollout.extract_risky_target_path(cmd_text, default_cwd=str(params.get("cwd") or "") or None)
+            target_root = Path(target_path).name if target_path else _extract_risky_target_root(cmd_text)
             ts_ms = int(row['ts'] or 0) * 1000
             rows.append({
                 'session_id': session_id,
@@ -1324,45 +1571,32 @@ def _collect_codex_sqlite_dangerous_history(*, session_id: str, session_name: st
                 'summary': _compact_risky_summary(cmd_text=cmd_text, risk_reason=risk_reason, target_root=target_root),
                 'risk_label': risk_label(risk_reason),
                 'risk_class': risk_class(risk_reason),
-                'restorable': risk_restorable(risk_reason),
+                'restorable': False,
                 'recovery_count': 0,
                 'config_path': config_path,
                 'restored': False,
                 'restored_count': 0,
-                'restored_label': 'available',
+                'restored_label': 'unavailable',
                 'restored_ts_ms': None,
                 'restored_ts_label': None,
-                'restore_disabled': not risk_restorable(risk_reason),
+                'restore_disabled': True,
                 'evidence': {},
                 'source': 'codex-log-fallback',
+                'target_path': target_path or None,
             })
             if len(rows) >= limit:
                 break
-    seen = {
-        (
-            int(item.get("created_ts_ms") or 0),
-            str(item.get("risk_reason") or ""),
-            str(item.get("target_root") or ""),
-        )
-        for item in rows
-    }
-    for item in _collect_codex_rollout_dangerous_history(
-        session_id=session_id,
-        session_name=session_name,
-        config_path=config_path,
-        limit=max(limit * 3, 20),
-    ):
-        key = (
-            int(item.get("created_ts_ms") or 0),
-            str(item.get("risk_reason") or ""),
-            str(item.get("target_root") or ""),
-        )
-        if key in seen:
-            continue
-        rows.append(item)
-        seen.add(key)
+    rows = _merge_history_rows(
+        base=rows,
+        extra=_collect_codex_rollout_dangerous_history(
+            session_id=session_id,
+            session_name=session_name,
+            config_path=config_path,
+            limit=max(limit * 3, 20),
+        ),
+    )
     rows.sort(key=lambda item: int(item.get("created_ts_ms") or 0), reverse=True)
-    return rows
+    return rows[: max(limit, 0)]
 
 
 def _extract_risky_target_root(cmd_text: str) -> str:
@@ -1638,7 +1872,7 @@ def _control_state_from_registry(row: dict[str, object] | None) -> str:
         return "pending"
     if capture_mode == "tmux-routed":
         return "attached" if _tmux_session_attached(controlled_session_name) else "routed"
-    if capture_mode == "launcher-routed":
+    if capture_mode in {"launcher-routed", "rollout-observed"}:
         return "routed"
     if _tmux_session_exists(controlled_session_name):
         return "attached" if _tmux_session_attached(controlled_session_name) else "routed"
@@ -1803,6 +2037,8 @@ def _upgrade_legacy_handoff_script(*, script_path: str | None, controlled_sessio
 
 
 def _auto_route_monitored_session(row: dict[str, object] | None) -> None:
+    if str(os.environ.get("CLAWCHAIN_UI_AUTO_ROUTE") or "").strip().lower() not in {"1", "true", "yes"}:
+        return
     if row is None:
         return
     if str(row.get("agent_id") or "") != "codex":
@@ -1847,7 +2083,7 @@ def _restore_monitored_codex_row_from_disk(*, account_id: str, session_id: str, 
         'path_hint': None,
         'config_path': str(config_path),
         'session_state': 'monitored',
-        'capture_mode': 'launcher-routed',
+        'capture_mode': 'rollout-observed',
         'attach_command': resume_command if is_windows() else f'tmux attach -t {controlled_session_name}',
         'controlled_session_name': controlled_session_name,
         'handoff_command': script_command_display(handoff_script) if handoff_script.exists() else None,
@@ -2124,6 +2360,8 @@ def _build_recovery_event_index(*, event_store_path: Path, session_id: str) -> d
     completed_ids: set[str] = set()
     failed_ids: set[str] = set()
     latest_ts_by_id: dict[str, int] = {}
+    latest_success_ts_by_id: dict[str, int] = {}
+    latest_failed_ts_by_id: dict[str, int] = {}
     latest_dangerous: dict[str, object] | None = None
     last_invoke: dict[str, object] | None = None
     for event in agent_proxy_cli._load_session_events(event_store_path=event_store_path, session_id=session_id):
@@ -2145,15 +2383,20 @@ def _build_recovery_event_index(*, event_store_path: Path, session_id: str) -> d
         latest_ts_by_id[recovery_id] = max(timestamp_ms, latest_ts_by_id.get(recovery_id, 0))
         if event_type == "RecoveryVerified" and bool(payload.get("verified", True)):
             verified_ids.add(recovery_id)
+            latest_success_ts_by_id[recovery_id] = max(timestamp_ms, latest_success_ts_by_id.get(recovery_id, 0))
         elif event_type == "RecoveryCompleted":
             completed_ids.add(recovery_id)
+            latest_success_ts_by_id[recovery_id] = max(timestamp_ms, latest_success_ts_by_id.get(recovery_id, 0))
         elif event_type == "RecoveryFailed":
             failed_ids.add(recovery_id)
+            latest_failed_ts_by_id[recovery_id] = max(timestamp_ms, latest_failed_ts_by_id.get(recovery_id, 0))
     return {
         "verified_ids": verified_ids,
         "completed_ids": completed_ids,
         "failed_ids": failed_ids,
         "latest_ts_by_id": latest_ts_by_id,
+        "latest_success_ts_by_id": latest_success_ts_by_id,
+        "latest_failed_ts_by_id": latest_failed_ts_by_id,
         "latest_dangerous": latest_dangerous,
     }
 
@@ -2228,6 +2471,20 @@ def build_history_payload(
     root_dir: Path | None = None,
 ) -> dict[str, object]:
     since_ms = None
+    registry_rows = _active_registry_rows(account_id, root_dir=root_dir)
+    if session_query is not None:
+        needle = session_query.strip().lower()
+        target_rows = [
+            row for row in registry_rows
+            if needle and (
+                needle in str(row.get("session_id") or "").lower()
+                or needle in str(row.get("session_name") or "").lower()
+            )
+        ]
+    else:
+        target_rows = [row for row in registry_rows if str(row.get("agent_id") or "") == "codex"]
+    for row in target_rows:
+        _backfill_codex_rollout_recovery(row=row)
     try:
         entries = agent_proxy_cli._collect_registry_review_entries(account_id=account_id, root_dir=root_dir)
     except TypeError:
@@ -2254,6 +2511,8 @@ def build_history_payload(
             "completed_ids": set(),
             "failed_ids": set(),
             "latest_ts_by_id": {},
+            "latest_success_ts_by_id": {},
+            "latest_failed_ts_by_id": {},
         }
         evidence = {}
         if config_path:
@@ -2275,9 +2534,12 @@ def build_history_payload(
                     pass
         recovery_ids = tuple(item.get("recovery_ids", ()) or ())
         restored_ids = event_index["verified_ids"] | event_index["completed_ids"]
+        failed_ids = event_index["failed_ids"]
         restored_count = sum(1 for rid in recovery_ids if rid in restored_ids)
         restored = restored_count > 0
-        restored_ts_ms = max((int(event_index["latest_ts_by_id"].get(rid, 0)) for rid in recovery_ids), default=0)
+        failed_count = sum(1 for rid in recovery_ids if rid in failed_ids)
+        restore_failed = failed_count > 0 and not restored
+        restored_ts_ms = max((int(event_index["latest_success_ts_by_id"].get(rid, 0)) for rid in recovery_ids), default=0)
         risk_reason = str(item.get("risk_reason") or "")
         risk_is_restorable = risk_restorable(risk_reason)
         items.append({
@@ -2300,12 +2562,16 @@ def build_history_payload(
             "config_path": item.get("config_path"),
             "restored": restored,
             "restored_count": restored_count,
-            "restored_label": "restored" if restored else "available",
+            "restored_label": "restored" if restored else ("failed" if restore_failed else "available"),
             "restored_ts_ms": restored_ts_ms or None,
             "restored_ts_label": agent_proxy_cli._format_ts_label(restored_ts_ms) if restored_ts_ms else None,
             "restore_disabled": restored or (not risk_is_restorable) or len(recovery_ids) == 0,
             "evidence": evidence,
         })
+    deduped_items: list[dict[str, object]] = []
+    for item in items:
+        deduped_items = _merge_history_rows(base=deduped_items, extra=[item])
+    items = deduped_items
     registry_rows = _active_registry_rows(account_id, root_dir=root_dir)
     fallback_rows: list[dict[str, object]] = []
     if session_query is not None:
@@ -2326,26 +2592,7 @@ def build_history_payload(
             config_path=str(row.get('config_path') or '') or None,
             limit=max(limit, 20),
         ))
-    seen = {
-        (
-            str(item.get('session_id') or ''),
-            int(item.get('created_ts_ms') or 0),
-            str(item.get('risk_reason') or ''),
-            str(item.get('target_root') or ''),
-        )
-        for item in items
-    }
-    for item in fallback_rows:
-        key = (
-            str(item.get('session_id') or ''),
-            int(item.get('created_ts_ms') or 0),
-            str(item.get('risk_reason') or ''),
-            str(item.get('target_root') or ''),
-        )
-        if key in seen:
-            continue
-        items.append(item)
-        seen.add(key)
+    items = _merge_history_rows(base=items, extra=fallback_rows)
     items.sort(key=lambda item: int(item.get('created_ts_ms') or 0), reverse=True)
     for index, item in enumerate(items, start=1):
         item['index'] = index
@@ -2380,12 +2627,19 @@ def build_activity_payload(*, account_id: str, root_dir: Path | None = None, lim
                         "headline": f"{row.get('session_name') or session_key}: dangerous command",
                         "detail": str(latest_dangerous.get("detail") or ""),
                     }
-                latest_restore_ts = max(event_index.get("latest_ts_by_id", {}).values(), default=0)
+                latest_restore_ts = max(event_index.get("latest_success_ts_by_id", {}).values(), default=0)
                 if latest_restore_ts and (latest_item is None or latest_restore_ts > int(latest_item.get("timestamp_ms") or 0)):
                     latest_item = {
                         "timestamp_ms": latest_restore_ts,
                         "headline": f"{row.get('session_name') or session_key}: restore verified",
                         "detail": "recovery path verified",
+                    }
+                latest_failed_ts = max(event_index.get("latest_failed_ts_by_id", {}).values(), default=0)
+                if latest_failed_ts and (latest_item is None or latest_failed_ts > int(latest_item.get("timestamp_ms") or 0)):
+                    latest_item = {
+                        "timestamp_ms": latest_failed_ts,
+                        "headline": f"{row.get('session_name') or session_key}: restore failed",
+                        "detail": "recovery execution failed; retry is still available",
                     }
         except Exception:  # noqa: BLE001
             pass
@@ -2610,8 +2864,8 @@ def perform_prepare_monitor_script(
     )
     for result in prepared:
         result["session_name"] = chosen_name
+        result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
         script_path, handoff_command = _build_handoff_script(item=picked, prepared_item=result)
-        result["capture_mode"] = "pending-handoff"
         if script_path:
             result["handoff_script_path"] = script_path
             result["handoff_command"] = handoff_command
@@ -2736,9 +2990,12 @@ def perform_onboard(
     )
     for result in prepared:
         result["session_name"] = chosen_name
+        result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
         if str(picked.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
-            result["relaunch_started"] = agent_proxy_cli._relaunch_codex_session(item=picked, prepared_item=result)
-            result["capture_mode"] = "launcher-routed" if result["relaunch_started"] else "pending-relaunch"
+            script_path, handoff_command = _build_handoff_script(item=picked, prepared_item=result)
+            if script_path:
+                result["handoff_script_path"] = script_path
+                result["handoff_command"] = handoff_command
     agent_proxy_cli._persist_prepared_sessions(
         account_id=account_id,
         prepared=prepared,
@@ -2756,7 +3013,7 @@ def perform_onboard(
     )
     return {
         "ok": True,
-        "message": f"Session {chosen_name} entered monitoring.",
+        "message": f"Session {chosen_name} entered monitoring without reopening terminals.",
         "prepared": prepared,
     }
 
@@ -2816,9 +3073,12 @@ def perform_auto_onboard(
         )
         for result in prepared:
             result["session_name"] = chosen_name
+            result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
             if str(item.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
-                result["relaunch_started"] = agent_proxy_cli._relaunch_codex_session(item=item, prepared_item=result)
-                result["capture_mode"] = "launcher-routed" if result["relaunch_started"] else "pending-relaunch"
+                script_path, handoff_command = _build_handoff_script(item=item, prepared_item=result)
+                if script_path:
+                    result["handoff_script_path"] = script_path
+                    result["handoff_command"] = handoff_command
             prepared_all.append(result)
             fallback_items[str(result.get("session_id") or "")] = {
                 "agent_id": item.get("agent_id"),
@@ -2842,15 +3102,6 @@ def perform_auto_onboard(
 
 
 def perform_join_monitor(*, account_id: str, password: str, session_fingerprint: str, session_name: str | None = None, agent_filter: str = 'all', root_dir: Path | None = None, no_start_service: bool = False) -> dict[str, object]:
-    prepared_script = perform_prepare_monitor_script(
-        account_id=account_id,
-        password=password,
-        session_fingerprint=session_fingerprint,
-        session_name=session_name,
-        agent_filter=agent_filter,
-        root_dir=root_dir,
-        no_start_service=no_start_service,
-    )
     result = perform_onboard(
         account_id=account_id,
         password=password,
@@ -2863,16 +3114,13 @@ def perform_join_monitor(*, account_id: str, password: str, session_fingerprint:
     prepared = list(result.get('prepared') or [])
     primary = prepared[0] if prepared else {}
     result['joined'] = bool(prepared)
-    for key in ('script_path', 'handoff_command', 'script_body'):
-        if prepared_script.get(key):
-            result[key] = prepared_script.get(key)
+    script_path = str(primary.get('handoff_script_path') or '')
+    if script_path and Path(script_path).exists():
+        result['script_path'] = script_path
+        result['handoff_command'] = primary.get('handoff_command')
+        result['script_body'] = Path(script_path).read_text(encoding='utf-8')
     if primary.get('attach_command'):
         result['attach_command'] = primary.get('attach_command')
-    elif prepared_script.get('prepared'):
-        fallback = list(prepared_script.get('prepared') or [])
-        first = fallback[0] if fallback else {}
-        if first.get('attach_command'):
-            result['attach_command'] = first.get('attach_command')
     if not result.get('ok'):
         registry_rows = agent_proxy_cli._load_session_registry(account_id, root_dir=root_dir)
         matched = next((row for row in registry_rows if str(row.get('session_id') or '') == session_fingerprint or str(row.get('session_fingerprint') or '') == session_fingerprint), None)

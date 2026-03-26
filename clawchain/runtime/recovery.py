@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -307,16 +310,37 @@ class RecoveryRepository:
         risk_reason: str,
         revision: str = "HEAD",
     ) -> RecoveryPlan | None:
-        repo_root = self._git_repo_root(source_path.parent if source_path.is_file() else source_path)
+        repo_probe = source_path.parent if source_path.exists() and source_path.is_file() else source_path
+        repo_root = self._git_repo_root(repo_probe)
         if repo_root is None:
             return None
-        relative_path = str(source_path.resolve().relative_to(repo_root))
-        tracked = _run_git(["ls-files", "--error-unmatch", relative_path], cwd=repo_root)
-        if tracked.returncode != 0:
+        resolved_source = source_path.expanduser().resolve()
+        try:
+            relative_path = str(resolved_source.relative_to(repo_root.resolve()))
+        except ValueError:
             return None
-        blob = _run_git(["rev-parse", f"{revision}:{relative_path}"], cwd=repo_root)
-        if blob.returncode != 0:
+        object_id_probe = _run_git(["rev-parse", f"{revision}:{relative_path}"], cwd=repo_root)
+        if object_id_probe.returncode != 0:
             return None
+        object_id = object_id_probe.stdout.strip()
+        if not object_id:
+            return None
+        object_type_probe = _run_git(["cat-file", "-t", object_id], cwd=repo_root)
+        object_type = object_type_probe.stdout.strip() if object_type_probe.returncode == 0 else ""
+        if source_path.exists():
+            target_digest = _digest_path(source_path)
+        elif object_type == "blob":
+            show = subprocess.run(
+                ["git", "show", f"{revision}:{relative_path}"],
+                cwd=repo_root,
+                capture_output=True,
+                check=False,
+            )
+            if show.returncode != 0:
+                return None
+            target_digest = sha256(show.stdout).hexdigest()
+        else:
+            target_digest = object_id
         recovery_id = f"recovery-{uuid4().hex}"
         locator_payload = {
             "source_kind": "git",
@@ -324,7 +348,8 @@ class RecoveryRepository:
             "repo_root": str(repo_root),
             "relative_path": relative_path,
             "revision": revision,
-            "blob_id": blob.stdout.strip(),
+            "blob_id": object_id,
+            "git_object_type": object_type or None,
         }
         locator = seal_backup_locator(locator_payload, recipient_public_key_pem)
         record = RecoveryLocatorRecord(
@@ -333,7 +358,7 @@ class RecoveryRepository:
             source_kind="git",
             target_path_hash=sha256(str(source_path.resolve()).encode("utf-8")).hexdigest(),
             target_name_hint=source_path.name,
-            target_digest=_digest_path(source_path),
+            target_digest=target_digest,
             locator=locator,
             risk_reason=risk_reason,
         )
@@ -403,7 +428,13 @@ class RecoveryRepository:
 
     @staticmethod
     def _git_repo_root(start: Path) -> Path | None:
-        probe = _run_git(["rev-parse", "--show-toplevel"], cwd=start)
+        probe_start = start
+        while not probe_start.exists():
+            parent = probe_start.parent
+            if parent == probe_start:
+                return None
+            probe_start = parent
+        probe = _run_git(["rev-parse", "--show-toplevel"], cwd=probe_start if probe_start.is_dir() else probe_start.parent)
         if probe.returncode != 0:
             return None
         return Path(probe.stdout.strip())
@@ -419,6 +450,42 @@ _SENSITIVE_PATH_TOKENS: tuple[str, ...] = (
 def _path_is_sensitive(path: str) -> bool:
     lowered = path.lower()
     return any(token in lowered for token in _SENSITIVE_PATH_TOKENS)
+
+
+def _shell_tokens(command_text: str) -> list[str]:
+    text = str(command_text or "").strip()
+    if not text:
+        return []
+    looks_windows = bool(re.search(r"[A-Za-z]:\\", text)) or ("\\" in text and os.name != "nt")
+    try:
+        return [str(token) for token in shlex.split(text, posix=(False if looks_windows else (os.name != "nt")))]
+    except ValueError:
+        return text.split()
+
+
+def _unwrap_shell_command(command_text: str) -> tuple[list[str], str]:
+    text = str(command_text or "").strip()
+    tokens = _shell_tokens(text)
+    lowered = [token.lower() for token in tokens]
+    if not tokens:
+        return [], text
+    launcher = Path(tokens[0]).name.lower()
+    if launcher in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        for flag in ("-command", "-c"):
+            if flag in lowered:
+                index = lowered.index(flag)
+                nested = " ".join(tokens[index + 1:])
+                return _unwrap_shell_command(nested)
+    if launcher in {"cmd", "cmd.exe"} and len(tokens) >= 3 and lowered[1] in {"/c", "/k"}:
+        nested = " ".join(tokens[2:])
+        return _unwrap_shell_command(nested)
+    return tokens, text
+
+
+def _is_output_only_command(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    return Path(tokens[0]).name.lower() in {"write-output", "write-host", "write-information", "echo", "printf"}
 
 
 def looks_like_risky_action(*, tool_name: str, params: dict[str, object]) -> tuple[bool, str]:
@@ -458,8 +525,11 @@ def looks_like_risky_action(*, tool_name: str, params: dict[str, object]) -> tup
         command_text = " ".join(tokens)
     else:
         command_text = str(cmd or "")
-        tokens = command_text.split()
+        tokens = []
+    tokens, command_text = _unwrap_shell_command(command_text)
     normalized = command_text.lower()
+    if _is_output_only_command(tokens):
+        return False, "shell-output-only"
     if "git reset --hard" in normalized:
         return True, "destructive_git_reset"
     if "git clean" in normalized and ("-fd" in normalized or "-fx" in normalized):
