@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from base64 import b64decode, b64encode
 from contextlib import redirect_stdout
+from datetime import datetime
 import sqlite3
 import time
 from io import StringIO
 import json
 import os
+import re
 from hashlib import sha256
 from os import urandom
 from pathlib import Path
@@ -20,7 +22,17 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import agent_proxy_cli
 from .agent_proxy import AgentProxyPaths
+from . import codex_rollout
 from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents
+from .platform_support import (
+    codex_command_matches,
+    codex_env_path,
+    codex_launcher_path,
+    is_windows,
+    monitored_handoff_path,
+    script_command_display,
+    script_command_parts,
+)
 from .risk_catalog import render_risk_filter_options, risk_label, risk_restorable, risk_class
 from .runtime.recovery import RecoveryCatalogStore
 from .runtime import recovery as recovery_runtime
@@ -853,7 +865,7 @@ def render_index_html() -> str:
           session_fingerprint: sessionFingerprint,
           session_name: sessionName || 'session',
           root_dir: rootDir || null,
-          no_start_service: true,
+          no_start_service: false,
         })
       });
       const prepared = Array.isArray(result.prepared) ? result.prepared : [];
@@ -1202,95 +1214,159 @@ def _resolve_ui_password(raw: str | None) -> str:
     return str(raw or UI_DEFAULT_PASSWORD)
 
 
+def _parse_iso_timestamp_ms(raw: str | None) -> int:
+    return codex_rollout.parse_iso_timestamp_ms(raw)
+
+
+def _codex_rollout_paths(session_id: str) -> list[Path]:
+    return codex_rollout.codex_rollout_paths(session_id)
+
+
+def _normalize_codex_rollout_tool_call(tool_name: str, arguments_text: str) -> tuple[str | None, dict[str, object]]:
+    return codex_rollout.normalize_rollout_tool_call(tool_name, arguments_text)
+
+
+def _collect_codex_rollout_dangerous_history(*, session_id: str, session_name: str, config_path: str | None = None, limit: int = 50) -> list[dict[str, object]]:
+    if not session_id:
+        return []
+    rows: list[dict[str, object]] = []
+    for rollout_path in _codex_rollout_paths(session_id):
+        meta = codex_rollout.read_rollout_session_meta(rollout_path)
+        items, _offset, _cwd = codex_rollout.read_rollout_updates(
+            rollout_path,
+            start_offset=0,
+            default_cwd=meta.cwd if meta is not None else None,
+        )
+        for item in items:
+            if item.kind != "function_call" or not item.tool_name:
+                continue
+            params = dict(item.params or {})
+            risky, risk_reason = recovery_runtime.looks_like_risky_action(tool_name=item.tool_name, params=params)
+            if not risky:
+                continue
+            cmd_text = str(params.get("cmd") or params.get("command") or params.get("path") or "").strip()
+            if not cmd_text:
+                continue
+            target_root = _extract_risky_target_root(cmd_text)
+            rows.append({
+                "session_id": session_id,
+                "session_name": session_name,
+                "impact_set_id": None,
+                "time_label": agent_proxy_cli._format_ts_label(item.timestamp_ms),
+                "created_ts_ms": item.timestamp_ms,
+                "risk_reason": risk_reason,
+                "target_root": target_root,
+                "summary": _compact_risky_summary(cmd_text=cmd_text, risk_reason=risk_reason, target_root=target_root),
+                "risk_label": risk_label(risk_reason),
+                "risk_class": risk_class(risk_reason),
+                "restorable": False,
+                "recovery_count": 0,
+                "config_path": config_path,
+                "restored": False,
+                "restored_count": 0,
+                "restored_label": "unavailable",
+                "restored_ts_ms": None,
+                "restored_ts_label": None,
+                "restore_disabled": True,
+                "evidence": {},
+                "source": "codex-rollout-fallback",
+            })
+    rows.sort(key=lambda row: int(row.get("created_ts_ms") or 0), reverse=True)
+    return rows[: max(limit, 0)]
+
+
 def _collect_codex_sqlite_dangerous_history(*, session_id: str, session_name: str, config_path: str | None = None, limit: int = 50) -> list[dict[str, object]]:
     if not session_id:
         return []
-    db_path = Path.home() / ".codex" / "logs_1.sqlite"
-    if not db_path.exists():
-        return []
     rows: list[dict[str, object]] = []
-    try:
-        con = sqlite3.connect(str(db_path))
-        con.row_factory = sqlite3.Row
-        sql_rows = con.execute(
-            "select ts, message from logs where thread_id = ? and message like 'ToolCall:%' order by ts desc, id desc limit ?",
-            (session_id, max(limit * 6, 60)),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    finally:
+    db_path = Path.home() / ".codex" / "logs_1.sqlite"
+    if db_path.exists():
         try:
-            con.close()
-        except Exception:
-            pass
-    for row in sql_rows:
-        message = str(row["message"] or "")
-        if not message.startswith('ToolCall: '):
+            con = sqlite3.connect(str(db_path))
+            con.row_factory = sqlite3.Row
+            sql_rows = con.execute(
+                "select ts, feedback_log_body from logs where thread_id = ? order by ts desc, id desc limit ?",
+                (session_id, max(limit * 6, 60)),
+            ).fetchall()
+        except sqlite3.Error:
+            sql_rows = []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+        for row in sql_rows:
+            message = str(row["feedback_log_body"] or "")
+            if not message.startswith('ToolCall: '):
+                continue
+            tool_payload = message[len('ToolCall: '):].strip()
+            tool_name, _, payload_text = tool_payload.partition(' ')
+            params: dict[str, object]
+            try:
+                params = json.loads(payload_text.strip()) if payload_text.strip() else {}
+            except json.JSONDecodeError:
+                continue
+            normalized_tool = 'system.run' if tool_name == 'exec_command' else tool_name
+            risky, risk_reason = recovery_runtime.looks_like_risky_action(tool_name=normalized_tool, params=params)
+            if not risky:
+                continue
+            cmd_text = str(params.get('cmd') or params.get('command') or '').strip()
+            target_root = _extract_risky_target_root(cmd_text)
+            ts_ms = int(row['ts'] or 0) * 1000
+            rows.append({
+                'session_id': session_id,
+                'session_name': session_name,
+                'impact_set_id': None,
+                'time_label': agent_proxy_cli._format_ts_label(ts_ms),
+                'created_ts_ms': ts_ms,
+                'risk_reason': risk_reason,
+                'target_root': target_root,
+                'summary': _compact_risky_summary(cmd_text=cmd_text, risk_reason=risk_reason, target_root=target_root),
+                'risk_label': risk_label(risk_reason),
+                'risk_class': risk_class(risk_reason),
+                'restorable': risk_restorable(risk_reason),
+                'recovery_count': 0,
+                'config_path': config_path,
+                'restored': False,
+                'restored_count': 0,
+                'restored_label': 'available',
+                'restored_ts_ms': None,
+                'restored_ts_label': None,
+                'restore_disabled': not risk_restorable(risk_reason),
+                'evidence': {},
+                'source': 'codex-log-fallback',
+            })
+            if len(rows) >= limit:
+                break
+    seen = {
+        (
+            int(item.get("created_ts_ms") or 0),
+            str(item.get("risk_reason") or ""),
+            str(item.get("target_root") or ""),
+        )
+        for item in rows
+    }
+    for item in _collect_codex_rollout_dangerous_history(
+        session_id=session_id,
+        session_name=session_name,
+        config_path=config_path,
+        limit=max(limit * 3, 20),
+    ):
+        key = (
+            int(item.get("created_ts_ms") or 0),
+            str(item.get("risk_reason") or ""),
+            str(item.get("target_root") or ""),
+        )
+        if key in seen:
             continue
-        tool_payload = message[len('ToolCall: '):].strip()
-        tool_name, _, payload_text = tool_payload.partition(' ')
-        params: dict[str, object]
-        try:
-            params = json.loads(payload_text.strip()) if payload_text.strip() else {}
-        except json.JSONDecodeError:
-            continue
-        normalized_tool = 'system.run' if tool_name == 'exec_command' else tool_name
-        risky, risk_reason = recovery_runtime.looks_like_risky_action(tool_name=normalized_tool, params=params)
-        if not risky:
-            continue
-        cmd_text = str(params.get('cmd') or params.get('command') or '').strip()
-        target_root = _extract_risky_target_root(cmd_text)
-        ts_ms = int(row['ts'] or 0) * 1000
-        rows.append({
-            'session_id': session_id,
-            'session_name': session_name,
-            'impact_set_id': None,
-            'time_label': agent_proxy_cli._format_ts_label(ts_ms),
-            'created_ts_ms': ts_ms,
-            'risk_reason': risk_reason,
-            'target_root': target_root,
-            'summary': _compact_risky_summary(cmd_text=cmd_text, risk_reason=risk_reason, target_root=target_root),
-            'risk_label': risk_label(risk_reason),
-            'risk_class': risk_class(risk_reason),
-            'restorable': risk_restorable(risk_reason),
-            'recovery_count': 0,
-            'config_path': config_path,
-            'restored': False,
-            'restored_count': 0,
-            'restored_label': 'available',
-            'restored_ts_ms': None,
-            'restored_ts_label': None,
-            'restore_disabled': not risk_restorable(risk_reason),
-            'evidence': {},
-            'source': 'codex-log-fallback',
-        })
-        if len(rows) >= limit:
-            break
+        rows.append(item)
+        seen.add(key)
+    rows.sort(key=lambda item: int(item.get("created_ts_ms") or 0), reverse=True)
     return rows
 
 
 def _extract_risky_target_root(cmd_text: str) -> str:
-    text = str(cmd_text or '').strip()
-    if not text:
-        return '-'
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        tokens = text.split()
-    target = ''
-    for token in reversed(tokens):
-        if token.startswith('-'):
-            continue
-        if token in {'rm', 'mv', 'find', 'chmod', 'chown', 'git'}:
-            continue
-        target = token
-        break
-    if not target:
-        return '-'
-    try:
-        return Path(target).name or target
-    except Exception:
-        return target
+    return codex_rollout.extract_risky_target_root(cmd_text)
 
 
 def _compact_risky_summary(*, cmd_text: str, risk_reason: str, target_root: str) -> str:
@@ -1397,10 +1473,21 @@ def _monitored_resume_command(row: dict[str, object] | None, running_item: dict[
         return None
     config_path = Path(str((row or {}).get('config_path') or '')).expanduser()
     if config_path.exists():
-        launcher_path = config_path.parent / 'codex-with-clawchain'
+        launcher_path = codex_launcher_path(config_path.parent)
         if launcher_path.exists():
-            return f"bash {shlex.quote(str(launcher_path))} resume {shlex.quote(session_id)}"
+            return script_command_display(launcher_path, "resume", session_id, keep_open=is_windows())
     return f"codex resume {shlex.quote(session_id)}"
+
+
+def _attach_command_for_row(row: dict[str, object] | None, running_item: dict[str, object] | None = None) -> str | None:
+    existing = str((row or {}).get("attach_command") or "").strip()
+    if existing:
+        return existing
+    agent_id = str((row or {}).get("agent_id") or (running_item or {}).get("agent_id") or "")
+    if is_windows() and agent_id == "codex":
+        return _monitored_resume_command(row, running_item)
+    controlled = _resolve_controlled_session_name(row)
+    return f"tmux attach -t {controlled}" if controlled else None
 
 
 def export_readable_proof_log(*, account_id: str, session_ref: str, password: str = "", root_dir: Path | None = None) -> dict[str, object]:
@@ -1473,21 +1560,36 @@ def export_encrypted_proof_log(*, account_id: str, session_ref: str, password: s
     )
 
 
+def _tmux_bin() -> str | None:
+    if is_windows():
+        return None
+    return shutil.which("tmux")
+
+
 def _tmux_session_exists(session_name: str | None) -> bool:
     if not session_name:
         return False
-    probe = subprocess.run(["tmux", "has-session", "-t", session_name], capture_output=True, text=True, check=False)
+    tmux_bin = _tmux_bin()
+    if not tmux_bin:
+        return False
+    probe = subprocess.run([tmux_bin, "has-session", "-t", session_name], capture_output=True, text=True, check=False)
     return probe.returncode == 0
 
 
 def _tmux_session_attached(session_name: str | None) -> bool:
     if not session_name:
         return False
-    probe = subprocess.run(["tmux", "list-clients", "-t", session_name], capture_output=True, text=True, check=False)
+    tmux_bin = _tmux_bin()
+    if not tmux_bin:
+        return False
+    probe = subprocess.run([tmux_bin, "list-clients", "-t", session_name], capture_output=True, text=True, check=False)
     return probe.returncode == 0 and bool(probe.stdout.strip())
 
 def _tmux_session_names() -> list[str]:
-    probe = subprocess.run(["tmux", "ls"], capture_output=True, text=True, check=False)
+    tmux_bin = _tmux_bin()
+    if not tmux_bin:
+        return []
+    probe = subprocess.run([tmux_bin, "ls"], capture_output=True, text=True, check=False)
     if probe.returncode != 0:
         return []
     names: list[str] = []
@@ -1553,17 +1655,43 @@ def _build_handoff_script(*, item: dict[str, object], prepared_item: dict[str, o
         tokens = shlex.split(command_text)
     except ValueError:
         tokens = command_text.split()
-    while tokens and Path(tokens[0]).name != "codex":
+    while tokens and not codex_command_matches(tokens[0]):
         tokens = tokens[1:]
     forwarded = tokens[1:] if tokens else []
     base_dir = Path(str((prepared_item.get("prepared_payload") or {}).get("artifacts", {}).get("base_dir") or (prepared_item.get("prepared_payload") or {}).get("base_dir") or "")).expanduser()
     if not base_dir:
         return None, None
-    script_path = base_dir / "enter-monitored-session.sh"
+    script_path = monitored_handoff_path(base_dir)
     pids = [str(int(pid)) for pid in item.get("pids", []) if pid is not None]
-    command = " ".join([shlex.quote("bash"), shlex.quote(launcher_path), *[shlex.quote(part) for part in forwarded]])
-    tmux_bin = shutil.which("tmux")
+    command = script_command_display(launcher_path, *forwarded, keep_open=is_windows())
+    tmux_bin = _tmux_bin()
     controlled_session_name = str(prepared_item.get("controlled_session_name") or session_id).replace(":", "-").replace("/", "-").replace(" ", "-")[:48] or "clawchain-session"
+    if is_windows():
+        lines = [
+            "@echo off",
+            "setlocal EnableExtensions",
+            "echo [clawchain] Preparing controlled session handoff...",
+            "echo [clawchain] This script will not close your current terminal.",
+            "",
+        ]
+        if pids:
+            lines.append("REM Stop the currently running native session if it is still active.")
+            for pid in pids:
+                lines.append(f"taskkill /PID {pid} /T /F >NUL 2>&1")
+            lines.extend(["timeout /t 1 /nobreak >NUL", ""])
+        lines.extend(
+            [
+                "echo [clawchain] Launching the controlled session in a new terminal window...",
+                f'start "" {command}',
+                "echo [clawchain] Controlled session launched in a new terminal window.",
+                "echo [clawchain] Re-enter later with:",
+                f"echo {command}",
+            ]
+        )
+        script_path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        prepared_item["attach_command"] = command
+        prepared_item["controlled_session_name"] = ""
+        return str(script_path), script_command_display(script_path)
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -1605,7 +1733,7 @@ def _build_handoff_script(*, item: dict[str, object], prepared_item: dict[str, o
         ])
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     script_path.chmod(script_path.stat().st_mode | 0o111)
-    return str(script_path), f"bash {shlex.quote(str(script_path))}"
+    return str(script_path), script_command_display(script_path)
 
 
 def _upgrade_legacy_handoff_script(*, script_path: str | None, controlled_session_name: str | None = None) -> tuple[str | None, str | None]:
@@ -1614,9 +1742,16 @@ def _upgrade_legacy_handoff_script(*, script_path: str | None, controlled_sessio
     path = Path(script_path).expanduser()
     if not path.exists():
         return None, None
+    if is_windows():
+        preferred = monitored_handoff_path(path.parent)
+        if preferred.exists():
+            return str(preferred), script_command_display(preferred)
+        if path.suffix.lower() == ".cmd":
+            return str(path), script_command_display(path)
+        return None, None
     body = path.read_text(encoding="utf-8")
     if 'This script will not close your current terminal.' in body:
-        return str(path), f"bash {shlex.quote(str(path))}"
+        return str(path), script_command_display(path)
     command = None
     for line in body.splitlines():
         line = line.strip()
@@ -1624,8 +1759,8 @@ def _upgrade_legacy_handoff_script(*, script_path: str | None, controlled_sessio
             command = line[len('exec '):].strip()
             break
     if not command:
-        return str(path), f"bash {shlex.quote(str(path))}"
-    tmux_bin = shutil.which('tmux')
+        return str(path), script_command_display(path)
+    tmux_bin = _tmux_bin()
     session_name = str(controlled_session_name or path.parent.name or 'clawchain-session').replace(':', '-').replace('/', '-').replace(' ', '-')[:48] or 'clawchain-session'
     lines = [
         '#!/usr/bin/env bash',
@@ -1660,7 +1795,7 @@ def _upgrade_legacy_handoff_script(*, script_path: str | None, controlled_sessio
         ])
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
     path.chmod(path.stat().st_mode | 0o111)
-    return str(path), f"bash {shlex.quote(str(path))}"
+    return str(path), script_command_display(path)
 
 
 
@@ -1683,7 +1818,7 @@ def _auto_route_monitored_session(row: dict[str, object] | None) -> None:
         return
     env = os.environ.copy()
     env["CLAWCHAIN_NO_ATTACH"] = "1"
-    subprocess.run(["bash", str(path)], env=env, capture_output=True, text=True, check=False, timeout=10)
+    subprocess.run(script_command_parts(path), env=env, capture_output=True, text=True, check=False, timeout=10)
 
 
 def _is_concrete_session_id(value: str | None) -> bool:
@@ -1700,9 +1835,10 @@ def _restore_monitored_codex_row_from_disk(*, account_id: str, session_id: str, 
     config_path = base_dir / 'agent-proxy.config.json'
     if not config_path.exists():
         return None
-    launcher_path = base_dir / 'codex-with-clawchain'
-    handoff_script = base_dir / 'enter-monitored-session.sh'
+    launcher_path = codex_launcher_path(base_dir)
+    handoff_script = monitored_handoff_path(base_dir)
     controlled_session_name = token.replace(':', '-').replace('/', '-').replace(' ', '-')[:48] or 'codex-session'
+    resume_command = script_command_display(launcher_path, "resume", token, keep_open=is_windows()) if launcher_path.exists() else f"codex resume {shlex.quote(token)}"
     row = {
         'agent_id': 'codex',
         'session_id': token,
@@ -1712,9 +1848,9 @@ def _restore_monitored_codex_row_from_disk(*, account_id: str, session_id: str, 
         'config_path': str(config_path),
         'session_state': 'monitored',
         'capture_mode': 'launcher-routed',
-        'attach_command': f'tmux attach -t {controlled_session_name}',
+        'attach_command': resume_command if is_windows() else f'tmux attach -t {controlled_session_name}',
         'controlled_session_name': controlled_session_name,
-        'handoff_command': f"bash {shlex.quote(str(handoff_script))}" if handoff_script.exists() else None,
+        'handoff_command': script_command_display(handoff_script) if handoff_script.exists() else None,
         'handoff_script_path': str(handoff_script) if handoff_script.exists() else None,
         'last_seen_ts_ms': int(time.time() * 1000),
     }
@@ -1781,7 +1917,7 @@ def _ensure_codex_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object
     base_dir = Path(str(getattr(stored, 'base_dir', '') or '')).expanduser()
     if not base_dir:
         return row
-    env_path = base_dir / 'codex-proxy.env'
+    env_path = codex_env_path(base_dir)
     if env_path.exists():
         try:
             env_text = env_path.read_text(encoding='utf-8')
@@ -1810,7 +1946,16 @@ def _ensure_codex_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object
         return row
     updated = dict(row)
     updated['config_path'] = str(artifacts.config_path)
-    updated['attach_command'] = updated.get('attach_command') or (f"tmux attach -t {session_id}" if session_id else None)
+    launcher_path = codex_launcher_path(base_dir)
+    handoff_script = monitored_handoff_path(base_dir)
+    updated['attach_command'] = updated.get('attach_command') or (
+        script_command_display(launcher_path, "resume", session_id, keep_open=True)
+        if is_windows() and session_id and launcher_path.exists()
+        else (f"tmux attach -t {session_id}" if session_id else None)
+    )
+    if handoff_script.exists():
+        updated['handoff_script_path'] = str(handoff_script)
+        updated['handoff_command'] = script_command_display(handoff_script)
     return updated
 
 
@@ -1899,7 +2044,7 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             "status": ui_status,
             "control_state": control_state,
             "capture_mode": capture_mode,
-            "attach_command": (matched or {}).get("attach_command") or ((f"tmux attach -t {_resolve_controlled_session_name(matched)}") if _resolve_controlled_session_name(matched) else None),
+            "attach_command": _attach_command_for_row(matched, item),
             "handoff_command": handoff_command or (matched or {}).get("handoff_command"),
             "handoff_script_path": handoff_script_path or (matched or {}).get("handoff_script_path"),
             "title": (matched or {}).get("session_name") or item.get("agent_id"),
@@ -1932,7 +2077,7 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             "status": _ui_status(_control_state_from_registry(row), live=False, matched=True),
             "control_state": _control_state_from_registry(row),
             "capture_mode": str(row.get("capture_mode") or "unknown"),
-            "attach_command": row.get("attach_command") or ((f"tmux attach -t {_resolve_controlled_session_name(row)}") if _resolve_controlled_session_name(row) else None),
+            "attach_command": _attach_command_for_row(row),
             "handoff_command": handoff_command or row.get("handoff_command"),
             "handoff_script_path": handoff_script_path or row.get("handoff_script_path"),
             "title": row.get("session_name") or session_id or row.get("agent_id"),
@@ -2330,7 +2475,7 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
             "last_seen_label": agent_proxy_cli._format_ts_label(last_seen_ts_ms) if last_seen_ts_ms else started_at,
             "capture_mode": str((matched_registry or {}).get("capture_mode") or ("pending-handoff" if matched_registry is None else "launcher-routed")),
             "control_state": _control_state_from_registry(matched_registry),
-            "attach_command": (matched_registry or {}).get("attach_command") or ((f"tmux attach -t {_resolve_controlled_session_name(matched_registry)}") if _resolve_controlled_session_name(matched_registry) else None),
+            "attach_command": _attach_command_for_row(matched_registry, matched_running),
             "resume_command": _monitored_resume_command(matched_registry, matched_running),
             "handoff_command": detail_handoff_command or (matched_registry or {}).get("handoff_command"),
             "handoff_script_path": detail_handoff_script_path or (matched_registry or {}).get("handoff_script_path"),
@@ -2442,7 +2587,7 @@ def perform_prepare_monitor_script(
     session_name: str | None = None,
     agent_filter: str = "all",
     root_dir: Path | None = None,
-    no_start_service: bool = True,
+    no_start_service: bool = False,
 ) -> dict[str, object]:
     sessions = agent_proxy_cli._coalesce_supervise_sessions(
         sessions=aggregate_running_agents(detect_running_agents(agent_filter=agent_filter))
@@ -2568,7 +2713,7 @@ def perform_onboard(
     session_name: str | None = None,
     agent_filter: str = "all",
     root_dir: Path | None = None,
-    no_start_service: bool = True,
+    no_start_service: bool = False,
 ) -> dict[str, object]:
     sessions = agent_proxy_cli._coalesce_supervise_sessions(
         sessions=aggregate_running_agents(detect_running_agents(agent_filter=agent_filter))
@@ -2638,7 +2783,7 @@ def perform_auto_onboard(
     password: str,
     agent_filter: str = "all",
     root_dir: Path | None = None,
-    no_start_service: bool = True,
+    no_start_service: bool = False,
 ) -> dict[str, object]:
     registry_rows = agent_proxy_cli._load_session_registry(account_id, root_dir=root_dir)
     sessions = agent_proxy_cli._coalesce_supervise_sessions(
@@ -2696,7 +2841,7 @@ def perform_auto_onboard(
     }
 
 
-def perform_join_monitor(*, account_id: str, password: str, session_fingerprint: str, session_name: str | None = None, agent_filter: str = 'all', root_dir: Path | None = None, no_start_service: bool = True) -> dict[str, object]:
+def perform_join_monitor(*, account_id: str, password: str, session_fingerprint: str, session_name: str | None = None, agent_filter: str = 'all', root_dir: Path | None = None, no_start_service: bool = False) -> dict[str, object]:
     prepared_script = perform_prepare_monitor_script(
         account_id=account_id,
         password=password,
@@ -2876,7 +3021,7 @@ class ClawChainUIHandler(BaseHTTPRequestHandler):
                 session_name=(payload.get("session_name") or None),
                 agent_filter=str(payload.get("agent") or "all"),
                 root_dir=_parse_root_dir(payload.get("root_dir")),
-                no_start_service=bool(payload.get("no_start_service", True)),
+                no_start_service=bool(payload.get("no_start_service", False)),
             )
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
@@ -2894,7 +3039,7 @@ class ClawChainUIHandler(BaseHTTPRequestHandler):
                 session_name=(payload.get("session_name") or None),
                 agent_filter=str(payload.get("agent") or "all"),
                 root_dir=_parse_root_dir(payload.get("root_dir")),
-                no_start_service=bool(payload.get("no_start_service", True)),
+                no_start_service=bool(payload.get("no_start_service", False)),
             )
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
@@ -2913,7 +3058,7 @@ class ClawChainUIHandler(BaseHTTPRequestHandler):
                 session_name=(payload.get("session_name") or None),
                 agent_filter=str(payload.get("agent") or "all"),
                 root_dir=_parse_root_dir(payload.get("root_dir")),
-                no_start_service=bool(payload.get("no_start_service", True)),
+                no_start_service=bool(payload.get("no_start_service", False)),
             )
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
@@ -2953,7 +3098,7 @@ class ClawChainUIHandler(BaseHTTPRequestHandler):
                 password=password,
                 agent_filter=str(payload.get("agent") or "all"),
                 root_dir=_parse_root_dir(payload.get("root_dir")),
-                no_start_service=bool(payload.get("no_start_service", True)),
+                no_start_service=bool(payload.get("no_start_service", False)),
             )
             self._send_json(result, status=200 if result.get("ok") else 400)
             return

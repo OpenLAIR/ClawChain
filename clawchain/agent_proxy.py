@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -63,6 +65,8 @@ def _run_git_probe(args: list[str], cwd: Path) -> subprocess.CompletedProcess[st
 
 
 def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subprocess.Popen[str] | None]:
+    if os.name == "nt":
+        return None, None
     manifest_path = base_dir / "deployment.json"
     if manifest_path.exists():
         try:
@@ -114,6 +118,8 @@ def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subproce
 
 
 def _bootstrap_local_evm_manifest_with_config(config: "AgentProxyConfig", base_dir: Path) -> tuple[Path | None, subprocess.Popen[str] | None]:
+    if os.name == "nt":
+        return None, None
     manifest_path = Path(config.evm_manifest_path).expanduser() if config.evm_manifest_path else (base_dir / "deployment.json")
     if manifest_path.exists():
         try:
@@ -283,35 +289,12 @@ def _canonical_execution_completed(
     )
 
 
-def _infer_target_paths(cmd: list[str], *, cwd: Path | None) -> list[Path]:
-    if not cmd:
-        return []
-    cwd = cwd or Path.cwd()
-    command_name = Path(cmd[0]).name
-    lowered = [part.lower() for part in cmd]
-    expanded: list[Path] = []
-    if command_name == "rm":
-        for part in cmd[1:]:
-            if part.startswith("-"):
-                continue
-            if any(ch in part for ch in "*?[]"):
-                expanded.extend(path for path in cwd.glob(part) if path.exists())
-            else:
-                path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
-                if path.exists():
-                    expanded.append(path)
-    elif command_name == "git" and (cmd[1:3] == ["reset", "--hard"] or cmd[1:2] == ["clean"]):
-        expanded.append(cwd.resolve())
-    elif command_name == "find" and "-delete" in lowered:
-        for part in cmd[1:]:
-            if part.startswith("-"):
-                break
-            path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
-            if path.exists():
-                expanded.append(path)
+def _expand_existing_targets(expanded: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     result: list[Path] = []
     for path in expanded:
+        if not path.exists():
+            continue
         candidates = [path]
         if path.is_dir():
             file_children = [child for child in sorted(path.rglob("*")) if child.is_file()]
@@ -324,11 +307,134 @@ def _infer_target_paths(cmd: list[str], *, cwd: Path | None) -> list[Path]:
     return result
 
 
-def _infer_referenced_paths(cmd: list[str], *, cwd: Path | None) -> list[Path]:
+def _command_tokens_and_text(cmd: list[str] | tuple[str, ...] | str | object) -> tuple[list[str], str]:
+    if isinstance(cmd, (list, tuple)):
+        tokens = [str(part) for part in cmd]
+        return tokens, " ".join(tokens)
+    text = str(cmd or "").strip()
+    if not text:
+        return [], ""
+    try:
+        tokens = shlex.split(text, posix=(os.name != "nt"))
+    except ValueError:
+        tokens = text.split()
+    return [str(part) for part in tokens], text
+
+
+def _resolve_candidate_path(token: str, *, cwd: Path) -> Path:
+    candidate = Path(str(token or "").strip().strip("'\""))
+    if candidate.is_absolute():
+        return candidate
+    return (cwd / candidate).resolve()
+
+
+def _resolve_powershell_variable(*, command_text: str, token: str) -> str:
+    candidate = str(token or "").strip().strip("'\"")
+    if not candidate.startswith("$"):
+        return candidate
+    var_name = re.escape(candidate[1:])
+    match = re.search(
+        rf"(?i)\${var_name}\s*=\s*(?P<value>'[^']+'|\"[^\"]+\"|\S+)",
+        command_text,
+    )
+    if match is None:
+        return candidate
+    return str(match.group("value") or "").strip().strip("'\"")
+
+
+def _infer_target_paths_from_text(command_text: str, *, cwd: Path | None) -> list[Path]:
+    text = str(command_text or "").strip()
+    if not text:
+        return []
+    cwd = cwd or Path.cwd()
+    remove_item_match = re.search(
+        r"(?i)\bRemove-Item\b.*?-(?:LiteralPath|Path)\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)",
+        text,
+    )
+    if remove_item_match is not None:
+        target = _resolve_powershell_variable(command_text=text, token=remove_item_match.group("path"))
+        return _expand_existing_targets([_resolve_candidate_path(target, cwd=cwd)])
+    delete_match = re.search(r"(?i)\b(?:del|erase)\b\s+(?P<path>'[^']+'|\"[^\"]+\"|\S+)", text)
+    if delete_match is not None:
+        target = _resolve_powershell_variable(command_text=text, token=delete_match.group("path"))
+        return _expand_existing_targets([_resolve_candidate_path(target, cwd=cwd)])
+    tokens, _ = _command_tokens_and_text(text)
+    lowered_tokens = [token.lower() for token in tokens]
+    if tokens:
+        launcher = Path(tokens[0]).name.lower()
+        if launcher in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            for flag in ("-command", "-c"):
+                if flag in lowered_tokens:
+                    index = lowered_tokens.index(flag)
+                    return _infer_target_paths_from_text(" ".join(tokens[index + 1:]), cwd=cwd)
+        if launcher in {"cmd", "cmd.exe"} and len(tokens) >= 3 and tokens[1].lower() in {"/c", "/k"}:
+            return _infer_target_paths_from_text(" ".join(tokens[2:]), cwd=cwd)
+    return _infer_target_paths(tokens, cwd=cwd)
+
+
+def _infer_target_paths(cmd: list[str] | tuple[str, ...] | str | object, *, cwd: Path | None) -> list[Path]:
+    tokens, text = _command_tokens_and_text(cmd)
+    if not tokens and not text:
+        return []
+    if text and not isinstance(cmd, (list, tuple)):
+        return _infer_target_paths_from_text(text, cwd=cwd)
+    cwd = cwd or Path.cwd()
+    command_name = Path(tokens[0]).name
+    lowered = [part.lower() for part in tokens]
+    expanded: list[Path] = []
+    if command_name == "rm":
+        for part in tokens[1:]:
+            if part.startswith("-"):
+                continue
+            if any(ch in part for ch in "*?[]"):
+                expanded.extend(path for path in cwd.glob(part) if path.exists())
+            else:
+                path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
+                if path.exists():
+                    expanded.append(path)
+    elif command_name == "git" and (tokens[1:3] == ["reset", "--hard"] or tokens[1:2] == ["clean"]):
+        expanded.append(cwd.resolve())
+    elif command_name == "find" and "-delete" in lowered:
+        for part in tokens[1:]:
+            if part.startswith("-"):
+                break
+            path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
+            if path.exists():
+                expanded.append(path)
+    return _expand_existing_targets(expanded)
+
+
+def _infer_referenced_paths_from_text(command_text: str, *, cwd: Path | None) -> list[Path]:
+    text = str(command_text or "").strip()
+    if not text:
+        return []
+    cwd = cwd or Path.cwd()
+    refs: list[Path] = list(_infer_target_paths_from_text(text, cwd=cwd))
+    seen = set(refs)
+    tokens, _ = _command_tokens_and_text(text)
+    for token in tokens[1:]:
+        cleaned = str(token or "").strip().strip("'\"")
+        if not cleaned or cleaned.startswith("-") or any(ch in cleaned for ch in "*?[]"):
+            continue
+        if cleaned.startswith("$"):
+            cleaned = _resolve_powershell_variable(command_text=text, token=cleaned)
+        path = _resolve_candidate_path(cleaned, cwd=cwd)
+        if path.exists() and path not in seen:
+            seen.add(path)
+            refs.append(path)
+    return refs
+
+
+def _infer_referenced_paths(cmd: list[str] | tuple[str, ...] | str | object, *, cwd: Path | None) -> list[Path]:
+    tokens, text = _command_tokens_and_text(cmd)
+    if not tokens and not text:
+        return []
+    if text and not isinstance(cmd, (list, tuple)):
+        return _infer_referenced_paths_from_text(text, cwd=cwd)
     cwd = cwd or Path.cwd()
     refs: list[Path] = []
     seen: set[Path] = set()
-    for token in cmd[1:]:
+    for token in tokens[1:]:
         if token.startswith("-") or any(ch in token for ch in "*?[]"):
             continue
         candidate = Path(token)
@@ -337,6 +443,26 @@ def _infer_referenced_paths(cmd: list[str], *, cwd: Path | None) -> list[Path]:
             seen.add(path)
             refs.append(path)
     return refs
+
+
+def _infer_tool_target_paths(*, tool_name: str, params: dict[str, object], cwd: Path | None) -> list[Path]:
+    if tool_name == "system.run":
+        return _infer_target_paths(params.get("cmd"), cwd=cwd)
+    if tool_name in {"fs.delete", "fs.write_text"}:
+        path = params.get("path")
+        if isinstance(path, str):
+            candidate = Path(path)
+            return [candidate if candidate.is_absolute() else ((cwd or Path.cwd()) / candidate).resolve()]
+        return []
+    if tool_name == "fs.move":
+        targets: list[Path] = []
+        for key in ("src", "dst"):
+            value = params.get(key)
+            if isinstance(value, str):
+                candidate = Path(value)
+                targets.append(candidate if candidate.is_absolute() else ((cwd or Path.cwd()) / candidate).resolve())
+        return targets
+    return []
 
 
 def _path_is_under(path: Path, root: Path) -> bool:
@@ -565,6 +691,7 @@ class TransparentAgentProxy:
     evm_process: subprocess.Popen[str] | None = None
     _session_next_index: dict[str, int] = field(default_factory=dict)
     _session_last_hash: dict[str, str | None] = field(default_factory=dict)
+    _observed_tool_calls: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
 
     def describe_evm_setup(self) -> AgentProxyEvmSetupStatus:
         requirements: list[AgentProxyRequirement] = []
@@ -776,7 +903,7 @@ class TransparentAgentProxy:
             password=config.password,
             label="sidecar-read",
         )
-        if config.auto_start_sidecar:
+        if config.auto_start_sidecar and os.name != "nt":
             sidecar_config = SidecarServiceConfig(
                 root_dir=paths.evidence_root,
                 socket_path=paths.sidecar_socket,
@@ -994,29 +1121,14 @@ class TransparentAgentProxy:
             )
         matched_paths: list[str] = []
         referenced_paths: list[Path] = []
-        target_paths: list[Path] = []
         if tool_name == "system.run":
-            cmd = [str(part) for part in params.get("cmd", [])] if isinstance(params.get("cmd"), (list, tuple)) else []
-            referenced_paths = _infer_referenced_paths(cmd, cwd=cwd)
-            target_paths = _infer_target_paths(cmd, cwd=cwd)
-        elif tool_name in {"fs.delete", "fs.write_text"}:
-            path = params.get("path")
-            if isinstance(path, str):
-                candidate = Path(path)
-                resolved = candidate if candidate.is_absolute() else ((cwd or Path.cwd()) / candidate).resolve()
-                referenced_paths = [resolved]
-                target_paths = [resolved]
-        elif tool_name == "fs.move":
-            for key in ("src", "dst"):
-                value = params.get(key)
-                if isinstance(value, str):
-                    candidate = Path(value)
-                    resolved = candidate if candidate.is_absolute() else ((cwd or Path.cwd()) / candidate).resolve()
-                    referenced_paths.append(resolved)
-                    target_paths.append(resolved)
+            referenced_paths = _infer_referenced_paths(params.get("cmd"), cwd=cwd)
+        elif tool_name in {"fs.delete", "fs.write_text", "fs.move"}:
+            referenced_paths = _infer_tool_target_paths(tool_name=tool_name, params=params, cwd=cwd)
         secret_read_command = False
         if tool_name == "system.run":
-            cmd_text = " ".join([str(part) for part in params.get("cmd", [])]).lower()
+            _cmd_tokens, cmd_text = _command_tokens_and_text(params.get("cmd"))
+            cmd_text = cmd_text.lower()
             secret_read_command = any(keyword in cmd_text for keyword in ("cat ", "sed ", "head ", "tail ", "less ", "more "))
         for path in referenced_paths:
             if _path_matches_policy(path, policy):
@@ -1043,7 +1155,8 @@ class TransparentAgentProxy:
                 matched_paths=tuple(dict.fromkeys(matched_paths)),
             )
         if matched_paths and policy.deny_deletes_on_protected_paths and tool_name == "system.run":
-            cmd_text = " ".join([str(part) for part in params.get("cmd", [])]).lower()
+            _cmd_tokens, cmd_text = _command_tokens_and_text(params.get("cmd"))
+            cmd_text = cmd_text.lower()
             destructive = any(token in cmd_text for token in ("rm ", "find ", "-delete", "git reset --hard", "git clean"))
             if destructive:
                 return AgentProxyPolicyDecision(
@@ -1355,20 +1468,7 @@ class TransparentAgentProxy:
                 protections=(),
                 bootstrap=self.bootstrap,
             )
-        target_paths: list[Path] = []
-        if tool_name == "system.run":
-            cmd = [str(part) for part in params.get("cmd", [])] if isinstance(params.get("cmd"), (list, tuple)) else []
-            target_paths = _infer_target_paths(cmd, cwd=cwd)
-        elif tool_name in {"fs.delete", "fs.write_text"}:
-            path = params.get("path")
-            if isinstance(path, str):
-                target_paths = [Path(path) if Path(path).is_absolute() else (cwd / path).resolve()]
-        elif tool_name == "fs.move":
-            src = params.get("src")
-            dst = params.get("dst")
-            for value in (src, dst):
-                if isinstance(value, str):
-                    target_paths.append(Path(value) if Path(value).is_absolute() else (cwd / value).resolve())
+        target_paths = _infer_tool_target_paths(tool_name=tool_name, params=params, cwd=cwd)
         protections = self._plan_protections(
             session_id=session_id,
             run_id=run_id,
@@ -1390,7 +1490,9 @@ class TransparentAgentProxy:
         error: str | None = None
         try:
             if tool_name == "system.run":
-                cmd = [str(part) for part in params.get("cmd", [])]
+                cmd, _cmd_text = _command_tokens_and_text(params.get("cmd"))
+                if not cmd:
+                    raise RuntimeError("system.run requires a non-empty cmd")
                 completed_process = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
                 success = completed_process.returncode == 0
                 output = {
@@ -1469,6 +1571,100 @@ class TransparentAgentProxy:
             protections=tuple(protections),
             bootstrap=self.bootstrap,
         )
+
+    def observe_external_tool_start(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        actor_id: str,
+        external_call_id: str,
+        tool_name: str,
+        params: dict[str, object],
+        cwd: Path | None = None,
+        channel: str = "external-tool",
+        policy_name: str = "external_observation_policy",
+        policy_version: str = "v1",
+    ) -> dict[str, object]:
+        key = (session_id, external_call_id)
+        existing = self._observed_tool_calls.get(key)
+        if existing is not None:
+            return existing
+        cwd = cwd or Path.cwd()
+        observed_params = dict(params)
+        observed_params.setdefault("external_call_id", external_call_id)
+        observed_params.setdefault("observation_mode", "external-rollout")
+        self._ensure_session_started(session_id=session_id, run_id=run_id, channel=channel)
+        policy_gate = self._evaluate_action_policy(tool_name=tool_name, params=observed_params, cwd=cwd)
+        tool_call_id, _policy = self._publish_tool_boundary(
+            session_id=session_id,
+            run_id=run_id,
+            actor_id=actor_id,
+            tool_name=tool_name,
+            params=observed_params,
+            policy_name=policy_name,
+            policy_version=policy_version,
+            decision="allow" if policy_gate.allowed else "deny",
+        )
+        target_paths = _infer_tool_target_paths(tool_name=tool_name, params=observed_params, cwd=cwd)
+        protections = self._plan_protections(
+            session_id=session_id,
+            run_id=run_id,
+            actor_id=actor_id,
+            tool_name=tool_name,
+            params=observed_params,
+            target_paths=_expand_recovery_targets([path for path in target_paths if path.exists()]),
+        )
+        self._start_tool_execution(
+            session_id=session_id,
+            run_id=run_id,
+            actor_id=actor_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            params=observed_params,
+        )
+        self.system.flush()
+        self.system.poll_anchor_submissions()
+        state = {
+            "session_id": session_id,
+            "run_id": run_id,
+            "actor_id": actor_id,
+            "external_call_id": external_call_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "params": observed_params,
+            "cwd": str(cwd),
+            "protections": tuple(protections),
+            "policy_allowed": policy_gate.allowed,
+            "policy_reason": policy_gate.reason_code,
+        }
+        self._observed_tool_calls[key] = state
+        return state
+
+    def observe_external_tool_completion(
+        self,
+        *,
+        session_id: str,
+        external_call_id: str,
+        result: dict[str, object] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        key = (session_id, external_call_id)
+        state = self._observed_tool_calls.pop(key, None)
+        if state is None:
+            return False
+        self._complete_tool_execution(
+            session_id=session_id,
+            run_id=str(state.get("run_id") or ""),
+            actor_id=str(state.get("actor_id") or "external-tool"),
+            tool_name=str(state.get("tool_name") or ""),
+            tool_call_id=str(state.get("tool_call_id") or ""),
+            result=result,
+            error=error,
+        )
+        self.system.flush()
+        self.system.poll_anchor_submissions()
+        return True
 
 
 __all__ = [

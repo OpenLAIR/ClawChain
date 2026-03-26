@@ -134,21 +134,73 @@ pip install -e .
 
 ### 3. Start the UI
 
+#### Same-machine local testing
+
+Use loopback binding when the browser is on the same host:
+
 ```bash
-python -m clawchain.agent_proxy_cli ui --host 0.0.0.0 --port 8888
+python -m clawchain.agent_proxy_cli ui --host 127.0.0.1 --port 8888
 ```
 
 Open:
 
 ```text
+http://127.0.0.1:8888
+```
+
+#### Remote access from another machine
+
+Bind on all interfaces only when you intentionally want remote access:
+
+```bash
+python -m clawchain.agent_proxy_cli ui --host 0.0.0.0 --port 8888
+```
+
+Then open the actual host IP from the browser:
+
+```text
 http://<host-ip>:8888
 ```
 
-If you are running on the same machine and loopback is available:
+Important:
 
-```text
-http://127.0.0.1:8888
+- `0.0.0.0` is a bind address, not a browser URL
+- if `8888` is already in use, switch to another port such as `8889`
+- on the same machine, prefer `127.0.0.1`
+
+### Platform Notes
+
+#### Linux / macOS
+
+You can use either direct Python startup or the helper shell script:
+
+```bash
+bash run_clawchain_ui.sh 8888
 ```
+
+The helper script is included in the repository root and is intended for Unix-like systems. It defaults to `HOST=127.0.0.1` and can be overridden, for example: `HOST=0.0.0.0 bash run_clawchain_ui.sh 8888`.
+
+On macOS, the monitored Codex launcher and handoff artifacts remain shell scripts and the UI will emit `bash ...` resume / handoff commands.
+
+#### Windows
+
+You can use either the batch helper or direct Python startup:
+
+```bat
+run_clawchain_ui.cmd 8888
+```
+
+or:
+
+```bash
+python -m clawchain.agent_proxy_cli ui --host 127.0.0.1 --port 8888
+```
+
+On Windows, the monitored Codex launcher and handoff artifacts are generated as `.cmd` files and the UI will emit `cmd /k ...` or `cmd /c ...` commands instead of `bash ...`.
+
+ClawChain does not require `pgrep` on Windows. The host monitor now falls back to a PowerShell process scan that prefers CIM when available and degrades to `Get-Process` when CIM command-line access is blocked.
+
+For monitored Codex sessions, ClawChain now runs a background rollout watcher from the local `service-start` process. On both Windows and macOS/Linux, it watches Codex `rollout-*.jsonl` tool calls in real time and, for risky `shell_command` / delete-style `apply_patch` actions, it plans recovery before the tool output is recorded so the session can produce recovery catalogs, receipts, submissions, and proof cards instead of UI-only fallback history.
 
 ## End-to-End Workflow
 
@@ -165,13 +217,22 @@ In the UI:
 3. click `Join Monitor`
 4. click `Copy Resume Command`
 
+`Join Monitor` now starts the per-session ClawChain background service by default. If that service is missing, the monitored session can still appear in the UI, but it will fall back to history-only records instead of producing recoverable proof artifacts.
+
 ### Step 3. Enter the controlled session
 
 Run the copied command in a terminal. That command re-enters the same session through the controlled runtime path.
 
+Platform-specific note:
+
+- Linux / macOS: the copied resume command will be a `bash .../codex-with-clawchain ...` command
+- Windows: the copied resume command will be a `cmd /k ...\\codex-with-clawchain.cmd ...` command
+
 ### Step 4. Perform a delete action
 
 Run a delete action from inside the controlled session.
+
+Important: perform the delete only after `Join Monitor` has completed and the copied resume command has relaunched the session through the monitored launcher. That is what allows the rollout watcher to capture the dangerous tool call and build a recoverable proof package.
 
 ### Step 5. Validate the result
 
@@ -180,6 +241,7 @@ Return to the UI and confirm:
 - the new delete appears in `Dangerous Operations`
 - the record is not `No Snapshot`
 - `Restore` is available
+- `Download Proof Log` includes non-empty `proof_cards` and the session evidence paths point into `runtime/local` and `recovery-vault`
 
 ### Step 6. Restore the deletion
 

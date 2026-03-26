@@ -464,6 +464,10 @@ def looks_like_risky_action(*, tool_name: str, params: dict[str, object]) -> tup
         return True, "destructive_git_reset"
     if "git clean" in normalized and ("-fd" in normalized or "-fx" in normalized):
         return True, "destructive_git_clean"
+    if "remove-item" in normalized:
+        return True, "destructive_delete"
+    if any(token in {"del", "erase"} or token.endswith("\\del") or token.endswith("/del") for token in tokens):
+        return True, "destructive_delete"
     if any(token == "rm" or token.endswith("/rm") for token in tokens):
         return True, "destructive_delete"
     if any("*" in token for token in tokens):

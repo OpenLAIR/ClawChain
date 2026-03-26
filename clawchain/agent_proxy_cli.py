@@ -11,6 +11,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from .agent_proxy import (
@@ -23,7 +24,9 @@ from .agent_proxy import (
 from .agent_proxy_config import AgentProxyStoredConfig, load_agent_proxy_config, write_agent_proxy_config
 from .agent_proxy_daemon import AgentProxyDaemon, AgentProxyDaemonClient
 from .codex_integration import bootstrap_codex_cli_integration
+from .codex_rollout_monitor import start_codex_rollout_watcher
 from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents, monitor_agents
+from .platform_support import codex_command_matches, is_windows, script_command_display, script_command_parts
 from .real_agent_harness import build_real_agent_harness_plan
 from .risk_catalog import risk_definition, risk_label
 from .runtime.anchor import (
@@ -2028,7 +2031,7 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
         tokens = command_text.split()
     if not tokens:
         return False
-    while tokens and os.path.basename(tokens[0]) != "codex":
+    while tokens and not codex_command_matches(tokens[0]):
         tokens = tokens[1:]
     if not tokens:
         return False
@@ -2059,7 +2062,7 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
     session_name = str(prepared_item.get("session_id") or item.get("session_fingerprint") or "codex-session")
     session_name = session_name.replace(":", "-").replace("/", "-").replace(" ", "-")[:48] or "codex-session"
     prepared_item["controlled_session_name"] = session_name
-    if tmux_bin:
+    if tmux_bin and not is_windows():
         launch_cmd = " ".join([shlex.quote("bash"), shlex.quote(str(launcher_path)), *[shlex.quote(part) for part in forwarded]])
         subprocess.run([tmux_bin, "kill-session", "-t", session_name], check=False, capture_output=True, text=True)
         created = subprocess.run(
@@ -2076,18 +2079,29 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
                 prepared_item["capture_mode"] = "tmux-routed"
                 return True
 
-    process = subprocess.Popen(
-        ["bash", str(launcher_path), *forwarded],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        env={**os.environ, "PYTHONPATH": _package_root_str()},
-    )
+    popen_kwargs: dict[str, object] = {
+        "env": {**os.environ, "PYTHONPATH": _package_root_str()},
+    }
+    launch_args = script_command_parts(launcher_path, *forwarded, keep_open=is_windows())
+    if is_windows():
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    else:
+        popen_kwargs.update(
+            {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
+                "start_new_session": True,
+            }
+        )
+    process = subprocess.Popen(launch_args, **popen_kwargs)
     time.sleep(0.1)
     started = process.poll() is None
     if started:
         prepared_item["capture_mode"] = "launcher-routed"
+        if is_windows():
+            session_id = str(prepared_item.get("session_id") or item.get("session_fingerprint") or "codex-session")
+            prepared_item["attach_command"] = script_command_display(launcher_path, "resume", session_id, keep_open=True)
     else:
         prepared_item["capture_mode"] = "pending-relaunch"
     return started
@@ -2781,11 +2795,18 @@ def main(argv: list[str] | None = None) -> int:
                 "recovery_source_selection": "automatic",
                 "artifacts": artifacts.to_dict(),
                 "next_steps": (
-                    [f"bash {artifacts.launcher_path} -C {workspace_root}"]
+                    [script_command_display(artifacts.launcher_path, "-C", str(workspace_root), keep_open=is_windows())]
                     if workspace_root is not None
-                    else [f"bash {artifacts.launcher_path}"]
+                    else [script_command_display(artifacts.launcher_path, keep_open=is_windows())]
                 ) + [
-                    f"env CLAWCHAIN_AGENT_PROXY_CONFIG={artifacts.config_path} PYTHONPATH={_package_root_str()} python -m clawchain.agent_proxy_cli watch codex",
+                    (
+                        f'set "CLAWCHAIN_AGENT_PROXY_CONFIG={artifacts.config_path}" && '
+                        f'set "PYTHONPATH={_package_root_str()};%PYTHONPATH%" && '
+                        "python -m clawchain.agent_proxy_cli watch codex"
+                        if is_windows()
+                        else f"env CLAWCHAIN_AGENT_PROXY_CONFIG={artifacts.config_path} "
+                        f"PYTHONPATH={_package_root_str()} python -m clawchain.agent_proxy_cli watch codex"
+                    ),
                 ],
             }, ensure_ascii=True, indent=2))
             return 0
@@ -4014,12 +4035,60 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         config_path = Path(args[1])
         stored = load_agent_proxy_config(config_path)
+        watcher_stop = None
+        watcher_thread = None
+        workspace_root = Path(stored.path_hint).expanduser() if stored.path_hint else None
+        state_path = stored.service_state_path()
+        if is_windows():
+            proxy = TransparentAgentProxy.create(stored.to_proxy_config())
+            artifacts = proxy.prepare_launch_artifacts(
+                session_id=stored.default_session_id,
+                run_id=stored.default_run_id,
+            )
+            if stored.default_session_id:
+                watcher_stop, watcher_thread = start_codex_rollout_watcher(
+                    proxy=proxy,
+                    lock=threading.Lock(),
+                    session_id=stored.default_session_id,
+                    run_id=stored.default_run_id,
+                    actor_id="codex",
+                    workspace_root=workspace_root,
+                )
+            state = {
+                "pid": os.getpid(),
+                "config_path": str(config_path),
+                "socket_path": None,
+                "env_path": artifacts.env_path,
+                "wrapper_path": artifacts.wrapper_path,
+                "started_at_ms": int(time.time() * 1000),
+            }
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+            try:
+                while True:
+                    time.sleep(1.0)
+            finally:
+                if watcher_stop is not None:
+                    watcher_stop.set()
+                if watcher_thread is not None:
+                    watcher_thread.join(timeout=2)
+                proxy.close()
+                if state_path.exists():
+                    state_path.unlink()
         daemon, artifacts = AgentProxyDaemon.start(
             config=stored.to_proxy_config(),
             session_id=stored.default_session_id,
             run_id=stored.default_run_id,
         )
-        state_path = stored.service_state_path()
+        if stored.default_session_id:
+            watcher_stop, watcher_thread = start_codex_rollout_watcher(
+                proxy=daemon.proxy,
+                lock=daemon.lock,
+                session_id=stored.default_session_id,
+                run_id=stored.default_run_id,
+                actor_id="codex",
+                workspace_root=workspace_root,
+            )
         state = {
             "pid": os.getpid(),
             "config_path": str(config_path),
@@ -4034,6 +4103,10 @@ def main(argv: list[str] | None = None) -> int:
             daemon.thread.join()
             return 0
         finally:
+            if watcher_stop is not None:
+                watcher_stop.set()
+            if watcher_thread is not None:
+                watcher_thread.join(timeout=2)
             daemon.close()
             if state_path.exists():
                 state_path.unlink()
@@ -4063,12 +4136,25 @@ def main(argv: list[str] | None = None) -> int:
         while time.time() < deadline:
             if state_path.exists():
                 break
+            if process.poll() is not None:
+                break
             time.sleep(0.1)
-        payload = {"ok": True, "spawned_pid": process.pid, "state_path": str(state_path)}
+        payload = {
+            "ok": state_path.exists(),
+            "spawned_pid": process.pid,
+            "state_path": str(state_path),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
         if state_path.exists():
             payload["service"] = json.loads(state_path.read_text(encoding="utf-8"))
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0
+        payload["running"] = process.poll() is None
+        payload["returncode"] = process.poll()
+        payload["reason"] = "service_state_not_created"
         print(json.dumps(payload, ensure_ascii=True, indent=2))
-        return 0
+        return 1
     if args[:1] == ["service-status"]:
         if len(args) < 2:
             print("usage: python -m clawchain.agent_proxy_cli service-status <config-path>")
@@ -4087,7 +4173,9 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             running = False
         ping_ok = False
-        if running and state.get("socket_path"):
+        if running and not state.get("socket_path"):
+            ping_ok = True
+        elif running and state.get("socket_path"):
             try:
                 ping_ok = bool(AgentProxyDaemonClient(Path(str(state["socket_path"]))).ping().get("ok"))
             except Exception:  # noqa: BLE001
