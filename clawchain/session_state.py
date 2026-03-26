@@ -108,6 +108,26 @@ class SessionRegistryEntry(TypedDict, total=False):
 
 
 def is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            access = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+            handle = kernel32.OpenProcess(access, False, pid)
+            if handle:
+                try:
+                    exit_code = ctypes.c_ulong()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return int(exit_code.value) == 259  # STILL_ACTIVE
+                    return True
+                finally:
+                    kernel32.CloseHandle(handle)
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True

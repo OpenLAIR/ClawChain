@@ -58,7 +58,7 @@ class ClawChainConfig:
     anchor_mode: str = "local"
     recovery_mode: str = "protected-backup"
     batch_max_events: int = 64
-    risky_action_recovery_sources: tuple[str, ...] = ("git", "snapshot")
+    risky_action_recovery_sources: tuple[str, ...] = ("snapshot",)
     recovery_execution_mode: str = "assisted"
     git_context_mode: str = "bind-existing-git"
     git_max_file_count_per_target: int = 512

@@ -413,15 +413,22 @@ def _infer_target_paths(cmd: list[str] | tuple[str, ...] | str | object, *, cwd:
             if any(ch in part for ch in "*?[]"):
                 expanded.extend(path for path in cwd.glob(part) if path.exists())
             else:
-                path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
+                path = _resolve_candidate_path(part, cwd=cwd)
                 expanded.append(path)
+    elif command_name in {"rmdir", "rd"}:
+        for part in tokens[1:]:
+            lowered_part = str(part).lower()
+            if lowered_part in {"/s", "/q"} or part.startswith("-"):
+                continue
+            path = _resolve_candidate_path(part, cwd=cwd)
+            expanded.append(path)
     elif command_name == "git" and (tokens[1:3] == ["reset", "--hard"] or tokens[1:2] == ["clean"]):
         expanded.append(cwd.resolve())
     elif command_name == "find" and "-delete" in lowered:
         for part in tokens[1:]:
             if part.startswith("-"):
                 break
-            path = (cwd / part).resolve() if not Path(part).is_absolute() else Path(part)
+            path = _resolve_candidate_path(part, cwd=cwd)
             expanded.append(path)
     return _dedupe_target_paths(expanded)
 
@@ -1179,7 +1186,7 @@ class TransparentAgentProxy:
         if matched_paths and policy.deny_deletes_on_protected_paths and tool_name == "system.run":
             _cmd_tokens, cmd_text = _command_tokens_and_text(params.get("cmd"))
             cmd_text = cmd_text.lower()
-            destructive = any(token in cmd_text for token in ("rm ", "find ", "-delete", "git reset --hard", "git clean"))
+            destructive = any(token in cmd_text for token in ("rm ", "rmdir ", " rd ", "find ", "-delete", "git reset --hard", "git clean"))
             if destructive:
                 return AgentProxyPolicyDecision(
                     allowed=False,

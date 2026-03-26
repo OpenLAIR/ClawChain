@@ -202,6 +202,14 @@ ClawChain does not require `pgrep` on Windows. The host monitor now falls back t
 
 For monitored Codex sessions, ClawChain now runs a background rollout watcher from the local `service-start` process. On both Windows and macOS/Linux, it watches Codex `rollout-*.jsonl` tool calls in real time and, for risky `shell_command` / delete-style `apply_patch` actions, it plans recovery before the tool output is recorded so the session can produce recovery catalogs, receipts, submissions, and proof cards instead of UI-only fallback history.
 
+ClawChain does not require any external snapshot utility such as `snap`, VSS tooling, or filesystem plugins. The `snapshot` recovery source is implemented inside ClawChain by copying the target into the session's local `recovery-vault`.
+
+For fresh deployments from GitHub:
+
+- the standard monitored restore flow is `snapshot`-backed and does not require any Git bootstrap
+- `Join Monitor` starts the background service and uses ClawChain's own `recovery-vault` snapshots for restore
+- no external snapshot utility or Git recovery setup is required for the normal `Join Monitor -> delete -> Restore` path
+
 ## End-to-End Workflow
 
 ### Step 1. Start a Codex session
@@ -218,6 +226,12 @@ In the UI:
 4. optionally click `Copy Resume Command` if you want a reusable monitored resume command for later
 
 `Join Monitor` now starts the per-session ClawChain background service by default and keeps the current Codex terminal in place. It does not open extra terminals automatically. If that service is missing, the monitored session can still appear in the UI, but it will fall back to history-only records instead of producing recoverable proof artifacts.
+
+If `Restore` is greyed out after a fresh deployment, the usual causes are:
+
+- the dangerous operation happened before `Join Monitor` finished starting the background service
+- the session is still attached to an older service process and needs a restart after updating ClawChain
+- the operation only produced a UI fallback record, which means no snapshot or recovery catalog was created at execution time
 
 ### Step 3. Continue in the same session
 

@@ -538,6 +538,8 @@ def looks_like_risky_action(*, tool_name: str, params: dict[str, object]) -> tup
         return True, "destructive_delete"
     if any(token in {"del", "erase"} or token.endswith("\\del") or token.endswith("/del") for token in tokens):
         return True, "destructive_delete"
+    if any(Path(token).name.lower() in {"rmdir", "rd"} or token.lower() in {"rmdir", "rd"} for token in tokens):
+        return True, "destructive_delete"
     if any(token == "rm" or token.endswith("/rm") for token in tokens):
         return True, "destructive_delete"
     if any("*" in token for token in tokens):

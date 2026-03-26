@@ -2042,6 +2042,45 @@ def _auto_select_git_context_mode(*, item: dict[str, object]) -> str:
     return "bind-existing-git" if probe.returncode == 0 else "managed-session-git"
 
 
+def _service_log_candidates(log_dir: Path) -> list[tuple[Path, Path]]:
+    primary = (
+        log_dir / "agent-proxy.out.log",
+        log_dir / "agent-proxy.err.log",
+    )
+    stamp = f"{int(time.time() * 1000)}-{os.getpid()}"
+    candidates = [primary]
+    for index in range(1, 5):
+        suffix = f".{stamp}-{index}"
+        candidates.append(
+            (
+                log_dir / f"agent-proxy{suffix}.out.log",
+                log_dir / f"agent-proxy{suffix}.err.log",
+            )
+        )
+    return candidates
+
+
+def _open_service_log_files(log_dir: Path) -> tuple[Path, Path, object, object]:
+    last_error: OSError | None = None
+    for stdout_path, stderr_path in _service_log_candidates(log_dir):
+        stdout_file = None
+        try:
+            stdout_file = stdout_path.open("a", encoding="utf-8")
+            stderr_file = stderr_path.open("a", encoding="utf-8")
+            return stdout_path, stderr_path, stdout_file, stderr_file
+        except OSError as exc:
+            last_error = exc
+            if stdout_file is not None:
+                try:
+                    stdout_file.close()
+                except OSError:
+                    pass
+            continue
+    if last_error is not None:
+        raise last_error
+    raise OSError("unable to open service log files")
+
+
 def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str, object]) -> bool:
     launcher_path = prepared_item.get("launcher_path")
     if not launcher_path:
@@ -4150,13 +4189,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:  # noqa: BLE001
                 state = None
             pid = int((state or {}).get("pid") or 0)
-            running = False
-            if pid > 0:
-                try:
-                    os.kill(pid, 0)
-                    running = True
-                except OSError:
-                    running = False
+            running = is_pid_alive(pid)
             if running and isinstance(state, dict):
                 ping_ok = False
                 if not state.get("socket_path"):
@@ -4182,14 +4215,37 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 pass
         python_exec = os.environ.get("PYTHON", sys.executable)
-        with stdout_path.open("a", encoding="utf-8") as stdout_file, stderr_path.open("a", encoding="utf-8") as stderr_file:
+        try:
+            stdout_path, stderr_path, stdout_file, stderr_file = _open_service_log_files(log_dir)
+        except OSError as exc:
+            print(json.dumps({
+                "ok": False,
+                "reason": "service_log_open_failed",
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "error": str(exc),
+            }, ensure_ascii=True, indent=2))
+            return 1
+        with stdout_file, stderr_file:
+            popen_kwargs: dict[str, object] = {
+                "stdout": stdout_file,
+                "stderr": stderr_file,
+                "stdin": subprocess.DEVNULL,
+                "close_fds": True,
+                "env": {**os.environ, "PYTHONPATH": _package_root_str()},
+            }
+            if is_windows():
+                creationflags = 0
+                creationflags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0)
+                creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0) or 0)
+                creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+                if creationflags:
+                    popen_kwargs["creationflags"] = creationflags
+            else:
+                popen_kwargs["start_new_session"] = True
             process = subprocess.Popen(
                 [python_exec, "-m", "clawchain.agent_proxy_cli", "serve", str(config_path)],
-                stdout=stdout_file,
-                stderr=stderr_file,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
+                **popen_kwargs,
             )
         deadline = time.time() + 5.0
         while time.time() < deadline:
@@ -4226,11 +4282,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         state = json.loads(state_path.read_text(encoding="utf-8"))
         pid = int(state["pid"])
-        running = True
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            running = False
+        running = is_pid_alive(pid)
         ping_ok = False
         if running and not state.get("socket_path"):
             ping_ok = True
@@ -4259,16 +4311,10 @@ def main(argv: list[str] | None = None) -> int:
             pass
         deadline = time.time() + 5.0
         while time.time() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not is_pid_alive(pid):
                 break
             time.sleep(0.1)
-        stopped = False
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            stopped = True
+        stopped = not is_pid_alive(pid)
         print(json.dumps({"ok": True, "stopped": stopped, "pid": pid}, ensure_ascii=True, indent=2))
         return 0 if stopped else 1
     if args[:1] == ["daemon-tool-json"]:
