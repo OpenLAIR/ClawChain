@@ -15,6 +15,8 @@ import subprocess
 import time
 from typing import Sequence
 
+from .agent_profiles import get_shell_agent_profile
+
 
 @dataclass(frozen=True)
 class MonitoredAgent:
@@ -80,6 +82,61 @@ _CODEX_ROLLOUT_CACHE: dict[str, object] = {
 }
 _CODEX_ROLLOUT_CACHE_TTL_SEC = 2.0
 _CODEX_ROLLOUT_CACHE_LIMIT = 256
+_CLAUDE_PROJECT_CACHE: dict[str, object] = {
+    "loaded_at": 0.0,
+    "items": (),
+}
+_CLAUDE_PROJECT_CACHE_TTL_SEC = 2.0
+_CLAUDE_PROJECT_CACHE_LIMIT = 256
+_PROC_BOOT_EPOCH: int | None = None
+
+
+def _proc_boot_epoch() -> int | None:
+    global _PROC_BOOT_EPOCH
+    if _PROC_BOOT_EPOCH is not None:
+        return _PROC_BOOT_EPOCH
+    if os.name == "nt":
+        return None
+    stat_path = Path("/proc/stat")
+    try:
+        for line in stat_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.startswith("btime "):
+                continue
+            _PROC_BOOT_EPOCH = int(line.split()[1])
+            return _PROC_BOOT_EPOCH
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _read_proc_started_epoch(pid: int) -> int | None:
+    if os.name == "nt":
+        return None
+    boot_epoch = _proc_boot_epoch()
+    if boot_epoch is None:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        close_paren = stat_text.rfind(")")
+        if close_paren < 0:
+            return None
+        fields = stat_text[close_paren + 2:].split()
+        if len(fields) < 20:
+            return None
+        clock_ticks = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        start_ticks = int(fields[19])
+    except (OSError, PermissionError, ValueError, KeyError):
+        return None
+    return boot_epoch + int(start_ticks / clock_ticks)
+
+
+def _format_started_at_label(epoch: int) -> str | None:
+    try:
+        return time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(epoch))
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 
 
 def list_known_agents() -> tuple[MonitoredAgent, ...]:
@@ -170,9 +227,21 @@ def _matches_agent(agent: MonitoredAgent, line: str) -> bool:
     return any(p in command.lower() for p in agent.process_patterns)
 
 
-def _integration_status(agent: MonitoredAgent, line: str) -> tuple[str, str]:
+def _integration_status(agent: MonitoredAgent, line: str, *, pid: int | None = None) -> tuple[str, str]:
+    managed_agent = _read_proc_env_var(pid, 'CLAWCHAIN_AGENT_ID')
+    managed_config = _read_proc_env_var(pid, 'CLAWCHAIN_AGENT_PROXY_CONFIG')
+    if managed_agent == agent.agent_id or managed_config:
+        return "managed", f"already routed through {agent.integration_mode}"
     lowered = line.lower()
-    if "clawchain" in lowered or "codex-with-clawchain" in lowered or "codex-shims" in lowered:
+    markers: set[str] = set()
+    profile = get_shell_agent_profile(agent.agent_id)
+    if profile is not None:
+        markers.update({
+            str(profile.launcher_stem or '').lower(),
+            str(profile.shim_dir_name or '').lower(),
+            str(profile.env_file_stem or '').lower(),
+        })
+    if any(marker and marker in lowered for marker in markers):
         return "managed", f"already routed through {agent.integration_mode}"
     return "detected-only", f"detected but not yet confirmed through {agent.integration_mode}"
 
@@ -183,9 +252,15 @@ def _extract_workspace_hint(agent: MonitoredAgent, line: str) -> str | None:
         tokens = shlex.split(command)
     except ValueError:
         tokens = command.split()
-    if agent.agent_id in {"codex", "claude-code", "cursor"}:
+    workspace_flags: list[str] = []
+    profile = get_shell_agent_profile(agent.agent_id)
+    if profile is not None and profile.workspace_flag:
+        workspace_flags.append(profile.workspace_flag)
+    if agent.agent_id == 'cursor':
+        workspace_flags.append('-C')
+    for workspace_flag in workspace_flags:
         for index, token in enumerate(tokens):
-            if token == "-C" and index + 1 < len(tokens):
+            if token == workspace_flag and index + 1 < len(tokens):
                 return tokens[index + 1]
     return None
 
@@ -289,6 +364,15 @@ class CodexRolloutSession:
     file_path: str
 
 
+@dataclass(frozen=True)
+class ClaudeProjectSession:
+    session_id: str
+    cwd: str | None
+    cwd_key: str | None
+    started_epoch: int | None
+    file_path: str
+
+
 def _read_codex_rollout_session(path: Path) -> CodexRolloutSession | None:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -361,8 +445,9 @@ def _lookup_codex_thread_id_from_rollouts(
     candidates = list(sessions)
     if path_key:
         path_matches = [item for item in candidates if item.cwd_key == path_key]
-        if path_matches:
-            candidates = path_matches
+        if not path_matches:
+            return None
+        candidates = path_matches
     if started_epoch is not None:
         window_sec = 1800
         scored: list[tuple[int, int, str]] = []
@@ -422,6 +507,153 @@ def _lookup_codex_thread_id_from_state(
     return _lookup_codex_thread_id_from_rollouts(started_epoch=started_epoch, path_hint=cwd)
 
 
+def _claude_root() -> Path:
+    return Path.home() / ".claude"
+
+
+def _read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _lookup_claude_session_id_from_pid_state(
+    pid: int | None,
+    *,
+    path_hint: str | None = None,
+) -> str | None:
+    if pid is None:
+        return None
+    payload = _read_json_object(_claude_root() / "sessions" / f"{pid}.json")
+    if not payload:
+        return None
+    session_id = str(payload.get("sessionId") or "").strip()
+    if not session_id:
+        return None
+    state_cwd = str(payload.get("cwd") or "").strip() or None
+    path_key = _normalize_workspace_path(path_hint or _read_proc_cwd(pid))
+    state_key = _normalize_workspace_path(state_cwd)
+    if path_key and state_key and path_key != state_key:
+        return None
+    return session_id
+
+
+def _read_claude_project_session(path: Path) -> ClaudeProjectSession | None:
+    session_id = ""
+    cwd: str | None = None
+    started_at: str | None = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _ in range(64):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if not session_id:
+                    session_id = str(payload.get("sessionId") or path.stem).strip()
+                if cwd is None:
+                    cwd = str(payload.get("cwd") or "").strip() or None
+                if started_at is None:
+                    started_at = str(payload.get("timestamp") or "").strip() or None
+                if session_id and cwd and started_at:
+                    break
+    except OSError:
+        return None
+    if not session_id:
+        return None
+    return ClaudeProjectSession(
+        session_id=session_id,
+        cwd=cwd,
+        cwd_key=_normalize_workspace_path(cwd),
+        started_epoch=_parse_started_at_epoch(started_at),
+        file_path=str(path),
+    )
+
+
+def _recent_claude_project_sessions() -> tuple[ClaudeProjectSession, ...]:
+    cached_at = float(_CLAUDE_PROJECT_CACHE.get("loaded_at") or 0.0)
+    cached_items = _CLAUDE_PROJECT_CACHE.get("items")
+    if isinstance(cached_items, tuple) and (time.time() - cached_at) <= _CLAUDE_PROJECT_CACHE_TTL_SEC:
+        return cached_items
+    sessions_root = _claude_root() / "projects"
+    items: list[ClaudeProjectSession] = []
+    files: list[Path] = []
+    if sessions_root.exists():
+        try:
+            files = sorted(
+                sessions_root.rglob("*.jsonl"),
+                key=lambda candidate: candidate.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            files = []
+    for session_path in files[:_CLAUDE_PROJECT_CACHE_LIMIT]:
+        session = _read_claude_project_session(session_path)
+        if session is not None:
+            items.append(session)
+    result = tuple(items)
+    _CLAUDE_PROJECT_CACHE["loaded_at"] = time.time()
+    _CLAUDE_PROJECT_CACHE["items"] = result
+    return result
+
+
+def _lookup_claude_session_id_from_projects(
+    *,
+    pid: int | None,
+    started_at: str | None,
+    path_hint: str | None = None,
+) -> str | None:
+    sessions = _recent_claude_project_sessions()
+    if not sessions:
+        return None
+    cwd = path_hint or _read_proc_cwd(pid)
+    path_key = _normalize_workspace_path(cwd)
+    candidates = list(sessions)
+    path_matched = False
+    if path_key:
+        path_matches = [item for item in candidates if item.cwd_key == path_key]
+        if not path_matches:
+            return None
+        candidates = path_matches
+        path_matched = True
+    started_epoch = _lookup_started_at_epoch(pid, started_at)
+    if started_epoch is not None:
+        window_sec = 1800
+        scored: list[tuple[int, int, str]] = []
+        for item in candidates:
+            if item.started_epoch is None:
+                continue
+            delta = abs(item.started_epoch - started_epoch)
+            if delta > window_sec:
+                continue
+            scored.append((0 if path_matched else 1, delta, item.session_id))
+        if scored:
+            scored.sort(key=lambda item: (item[0], item[1], item[2]))
+            return scored[0][2]
+    if path_matched and candidates:
+        return candidates[0].session_id
+    return None
+
+
+def _lookup_claude_session_id_from_state(
+    pid: int | None,
+    *,
+    started_at: str | None,
+    path_hint: str | None = None,
+) -> str | None:
+    direct = _lookup_claude_session_id_from_pid_state(pid, path_hint=path_hint)
+    if direct:
+        return direct
+    return _lookup_claude_session_id_from_projects(pid=pid, started_at=started_at, path_hint=path_hint)
+
+
 def _extract_resume_id(
     tokens: Sequence[str],
     *,
@@ -431,6 +663,10 @@ def _extract_resume_id(
     path_hint: str | None = None,
 ) -> str | None:
     token_list = list(tokens)
+    if agent_id == "claude-code":
+        state_resume_id = _lookup_claude_session_id_from_state(pid, started_at=started_at, path_hint=path_hint)
+        if state_resume_id:
+            return state_resume_id
     if "resume" in token_list:
         index = token_list.index("resume")
         if index + 1 < len(token_list):
@@ -494,7 +730,15 @@ def _extract_session_fingerprint(agent: MonitoredAgent, line: str, *, path_hint:
         tokens = shlex.split(command)
     except ValueError:
         tokens = command.split()
-    resume_id = _extract_resume_id(tokens, agent_id=agent.agent_id, path_hint=path_hint)
+    pid = _extract_pid(line)
+    started_at = _lookup_started_at_label(pid)
+    resume_id = _extract_resume_id(
+        tokens,
+        agent_id=agent.agent_id,
+        pid=pid,
+        started_at=started_at,
+        path_hint=path_hint,
+    )
     if resume_id:
         return f"resume:{resume_id}"
     if path_hint:
@@ -508,6 +752,16 @@ def _lookup_started_at_label(pid: int | None) -> str | None:
     cached = _scan_metadata_value(pid, "started_at")
     if isinstance(cached, str) and cached:
         return cached
+    epoch = _scan_metadata_value(pid, "started_epoch")
+    if isinstance(epoch, int):
+        label = _format_started_at_label(epoch)
+        if label:
+            return label
+    epoch = _read_proc_started_epoch(pid)
+    if epoch is not None:
+        label = _format_started_at_label(epoch)
+        if label:
+            return label
     if os.name == "nt":
         return None
     probe = subprocess.run(
@@ -582,17 +836,18 @@ def _process_identity(line: str) -> str:
 def _prepare_command(agent: MonitoredAgent, *, path_hint: str | None) -> str:
     workspace_arg = path_hint or "<path>"
     git_context = "--git-context <bind-existing-git|managed-session-git>"
-    if agent.agent_id == "codex":
-        workspace_part = f"--workspace {workspace_arg} " if path_hint else ""
-        return (
-            "python -m clawchain.agent_proxy_cli prepare codex <account> <password> "
-            f"{workspace_part}{git_context}"
-        )
-    if agent.agent_id == "claude-code":
-        return (
-            "python -m clawchain.agent_proxy_cli prepare claude-code <account> <password> "
-            f"--workspace {workspace_arg} {git_context}"
-        )
+    profile = get_shell_agent_profile(agent.agent_id)
+    if profile is not None:
+        parts = [
+            "python -m clawchain.agent_proxy_cli prepare",
+            profile.profile_id,
+            "<account>",
+            "<password>",
+        ]
+        if path_hint:
+            parts.extend(["--workspace", workspace_arg])
+        parts.append(git_context)
+        return " ".join(parts)
     if agent.agent_id == "cursor":
         return (
             "python -m clawchain.agent_proxy_cli prepare cursor-agent <account> <password> "
@@ -852,9 +1107,9 @@ def detect_running_agents(*, agent_filter: str = "all") -> list[dict[str, str]]:
             if _is_internal_monitor_process(line):
                 continue
             if _matches_agent(agent, line):
-                status, status_message = _integration_status(agent, line)
-                path_hint = _extract_workspace_hint(agent, line)
                 pid = _extract_pid(line)
+                status, status_message = _integration_status(agent, line, pid=pid)
+                path_hint = _extract_workspace_hint(agent, line)
                 if not path_hint and pid is not None:
                     path_hint = _read_proc_cwd(pid)
                 ppid = _read_proc_ppid(pid) if pid else None
@@ -901,7 +1156,14 @@ def aggregate_running_agents(matches: list[dict[str, str]]) -> list[dict[str, ob
     for (_agent_id, _group_key), items in grouped.items():
         first = items[0]
         statuses = {str(item["monitoring_status"]) for item in items}
-        monitoring_status = "managed" if "managed" in statuses else str(first["monitoring_status"])
+        managed_process_count = sum(1 for item in items if str(item.get("monitoring_status") or "") == "managed")
+        unmanaged_process_count = sum(1 for item in items if str(item.get("monitoring_status") or "") != "managed")
+        if managed_process_count and unmanaged_process_count:
+            monitoring_status = "mixed"
+        elif managed_process_count:
+            monitoring_status = "managed"
+        else:
+            monitoring_status = str(first["monitoring_status"])
         path_hint = next((str(item["path_hint"]) for item in items if item.get("path_hint")), None)
         started_at = next((str(item["started_at"]) for item in items if item.get("started_at")), None)
         session_fingerprint = next((str(item["session_fingerprint"]) for item in items if item.get("session_fingerprint")), _process_identity(str(first["process_line"])))
@@ -911,6 +1173,8 @@ def aggregate_running_agents(matches: list[dict[str, str]]) -> list[dict[str, ob
                 "display_name": first["display_name"],
                 "integration_mode": first["integration_mode"],
                 "monitoring_status": monitoring_status,
+                "managed_process_count": managed_process_count,
+                "unmanaged_process_count": unmanaged_process_count,
                 "path_hint": path_hint,
                 "started_at": started_at,
                 "session_fingerprint": session_fingerprint,

@@ -21,13 +21,20 @@ from urllib.parse import parse_qs, urlparse
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import agent_proxy_cli
+from .agent_profiles import (
+    get_shell_agent_profile,
+    iter_shell_agent_profiles,
+    shell_agent_default_capture_mode,
+    shell_agent_supports_prepare,
+)
 from .agent_proxy import AgentProxyPaths, TransparentAgentProxy
 from . import codex_rollout
 from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents, _parse_started_at_epoch
 from .platform_support import (
-    codex_command_matches,
-    codex_env_path,
-    codex_launcher_path,
+    agent_command_matches,
+    agent_env_path,
+    agent_launcher_path,
+    command_display,
     is_windows,
     monitored_handoff_path,
     script_command_display,
@@ -795,12 +802,14 @@ def render_index_html() -> str:
               <div class="row">
                 <span class="pill ${String(item.live_state || '') === 'offline' ? 'warn' : 'good'}">${String(item.live_state || '') === 'offline' ? 'offline' : 'running'}</span>
                 <span class="pill ${String(item.status || '') === 'monitored' ? 'good' : (String(item.status || '') === 'pending' ? 'warn' : '')}">${escapeHtml(item.status || 'unmanaged')}</span>
+                ${item.monitoring_warning ? `<span class="pill warn">mixed terminals</span>` : ''}
               </div>
             </div>
             <div class="meta">session</div>
             <div class="mono" style="font-size:12px; margin-bottom:8px;">${escapeHtml(item.session_id || '-')}</div>
             <div class="meta" style="margin-bottom:8px;">name</div>
             <div style="font-weight:600; margin-bottom:8px;">${escapeHtml(item.session_name || item.title || 'session')}</div>
+            ${item.monitoring_warning ? `<div class="meta" style="margin-bottom:8px; color:#b45309;">${escapeHtml(item.monitoring_warning)}</div>` : ''}
             <div class="meta" style="margin-top:10px;">started ${escapeHtml(item.started_at || '-')}</div>
             <div class="meta">last update ${escapeHtml(item.last_seen_label || '-')}</div>
           </button>
@@ -1084,7 +1093,9 @@ def render_index_html() -> str:
             <span class="pill">started ${escapeHtml(data.detail?.started_at || "-")}</span>
             <span class="pill">last update ${escapeHtml(data.detail?.last_seen_label || "-")}</span>
             <span class="pill ${statusTone}">${escapeHtml(data.detail?.status || "-")}</span>
+            ${data.detail?.monitoring_warning ? `<span class="pill warn">mixed terminals</span>` : ''}
           </div>
+          ${data.detail?.monitoring_warning ? `<div class="meta" style="margin-top:10px; color:#b45309;">${escapeHtml(data.detail?.monitoring_warning || '')}</div>` : ''}
         </div>`;
       const action = document.getElementById("sessionDetailAction");
       const stateTone = data.detail?.control_state === "attached" ? "good" : (data.detail?.control_state === "routed" ? "" : "warn");
@@ -1733,12 +1744,29 @@ def _monitored_resume_command(row: dict[str, object] | None, running_item: dict[
     session_id = str((row or {}).get('session_id') or _immutable_session_id(running_item or {}) or '').strip()
     if not session_id or session_id.startswith('proc:') or session_id.startswith('path:'):
         return None
-    config_path = Path(str((row or {}).get('config_path') or '')).expanduser()
-    if config_path.exists():
-        launcher_path = codex_launcher_path(config_path.parent)
+    agent_id = str((row or {}).get('agent_id') or (running_item or {}).get('agent_id') or '').strip()
+    profile = get_shell_agent_profile(agent_id)
+    if profile is None:
+        return None
+    resume_args = list(profile.resume_args(session_id))
+    if not resume_args:
+        return None
+    candidate_base_dirs: list[Path] = []
+    config_path_value = str((row or {}).get('config_path') or '').strip()
+    if config_path_value:
+        config_path = Path(config_path_value).expanduser()
+        if config_path.exists():
+            candidate_base_dirs.append(config_path.parent)
+    base_dir_value = str((row or {}).get('base_dir') or (running_item or {}).get('base_dir') or '').strip()
+    if base_dir_value:
+        base_dir = Path(base_dir_value).expanduser()
+        if base_dir not in candidate_base_dirs:
+            candidate_base_dirs.append(base_dir)
+    for base_dir in candidate_base_dirs:
+        launcher_path = agent_launcher_path(base_dir, profile.agent_id)
         if launcher_path.exists():
-            return script_command_display(launcher_path, "resume", session_id, keep_open=is_windows())
-    return f"codex resume {shlex.quote(session_id)}"
+            return script_command_display(launcher_path, *resume_args, keep_open=is_windows())
+    return command_display([profile.cli_command, *resume_args])
 
 
 def _attach_command_for_row(row: dict[str, object] | None, running_item: dict[str, object] | None = None) -> str | None:
@@ -1746,7 +1774,7 @@ def _attach_command_for_row(row: dict[str, object] | None, running_item: dict[st
     if existing:
         return existing
     agent_id = str((row or {}).get("agent_id") or (running_item or {}).get("agent_id") or "")
-    if is_windows() and agent_id == "codex":
+    if is_windows() and shell_agent_supports_prepare(agent_id):
         return _monitored_resume_command(row, running_item)
     controlled = _resolve_controlled_session_name(row)
     return f"tmux attach -t {controlled}" if controlled else None
@@ -1933,17 +1961,35 @@ def _control_state_from_registry(row: dict[str, object] | None) -> str:
     return "pending"
 
 
+def _monitoring_warning_for_item(item: dict[str, object] | None, matched: dict[str, object] | None = None) -> str | None:
+    if not item:
+        return None
+    monitoring_status = str(item.get("monitoring_status") or "")
+    if monitoring_status != "mixed":
+        return None
+    agent_id = str((matched or {}).get("agent_id") or item.get("agent_id") or "")
+    if not shell_agent_supports_prepare(agent_id):
+        return None
+    unmanaged_count = int(item.get("unmanaged_process_count") or 0)
+    managed_count = int(item.get("managed_process_count") or 0)
+    if unmanaged_count <= 0 or managed_count <= 0:
+        return None
+    return "Native and ClawChain-routed terminals are both active for this session. Continue only in the controlled terminal; commands typed in the original terminal will not be captured."
+
+
 def _build_handoff_script(*, item: dict[str, object], prepared_item: dict[str, object]) -> tuple[str, str] | tuple[None, None]:
+    agent_id = str(prepared_item.get("agent_id") or item.get("agent_id") or "")
+    profile = get_shell_agent_profile(agent_id)
     launcher_path = str(prepared_item.get("launcher_path") or "")
-    session_id = str(prepared_item.get("session_id") or prepared_item.get("session_name") or item.get("session_fingerprint") or "session")
-    if not launcher_path or not session_id:
+    session_id = str(prepared_item.get("session_id") or prepared_item.get("session_name") or item.get("session_fingerprint") or (profile.default_session_id if profile is not None else "session"))
+    if profile is None or not launcher_path or not session_id:
         return None, None
     command_text = str(item.get("command_text") or item.get("sample_process_summary") or "")
     try:
         tokens = shlex.split(command_text)
     except ValueError:
         tokens = command_text.split()
-    while tokens and not codex_command_matches(tokens[0]):
+    while tokens and not agent_command_matches(profile.agent_id, tokens[0]):
         tokens = tokens[1:]
     forwarded = tokens[1:] if tokens else []
     base_dir = Path(str((prepared_item.get("prepared_payload") or {}).get("artifacts", {}).get("base_dir") or (prepared_item.get("prepared_payload") or {}).get("base_dir") or "")).expanduser()
@@ -2095,7 +2141,7 @@ def _auto_route_monitored_session(row: dict[str, object] | None) -> None:
         return
     if row is None:
         return
-    if str(row.get("agent_id") or "") != "codex":
+    if not shell_agent_supports_prepare(str(row.get("agent_id") or "")):
         return
     controlled = _resolve_controlled_session_name(row)
     if controlled and _tmux_session_exists(controlled):
@@ -2116,36 +2162,108 @@ def _is_concrete_session_id(value: str | None) -> bool:
     return bool(token) and not token.startswith("proc:") and not token.startswith("path:")
 
 
-def _restore_monitored_codex_row_from_disk(*, account_id: str, session_id: str, root_dir: Path | None = None) -> dict[str, object] | None:
+def _row_has_concrete_session_identity(row: dict[str, object] | None) -> bool:
+    if row is None:
+        return False
+    fingerprint = str((row or {}).get('session_fingerprint') or '').strip()
+    if fingerprint.startswith('resume:'):
+        return True
+    if fingerprint.startswith('path:') or fingerprint.startswith('proc:'):
+        return False
+    return _is_concrete_session_id((row or {}).get('session_id'))
+
+
+def _dedupe_registry_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    concrete_pairs = {
+        (str(row.get('agent_id') or ''), str(row.get('path_hint') or ''))
+        for row in rows
+        if _row_has_concrete_session_identity(row) and str(row.get('path_hint') or '')
+    }
+    filtered: list[dict[str, object]] = []
+    for row in rows:
+        pair = (str(row.get('agent_id') or ''), str(row.get('path_hint') or ''))
+        if pair in concrete_pairs and not _row_has_concrete_session_identity(row):
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _candidate_shell_agent_base_dirs(*, account_id: str, session_id: str, agent_id: str | None = None, root_dir: Path | None = None) -> list[Path]:
+    base_root = root_dir.expanduser() if root_dir is not None else (Path.home() / '.clawchain-agent')
+    account_root = base_root / account_id
+    names: list[str] = []
+    if agent_id:
+        profile = get_shell_agent_profile(agent_id)
+        if profile is not None:
+            names.extend(profile.directory_candidates())
+        else:
+            names.append(str(agent_id))
+    else:
+        for profile in iter_shell_agent_profiles():
+            names.extend(profile.directory_candidates())
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for name in names:
+        token = str(name or '').strip()
+        if not token:
+            continue
+        candidate = account_root / token / session_id
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(candidate)
+    for candidate in account_root.glob(f'*/{session_id}'):
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(candidate)
+    return candidates
+
+
+def _restore_monitored_shell_agent_row_from_disk(*, account_id: str, session_id: str, agent_id: str | None = None, root_dir: Path | None = None) -> dict[str, object] | None:
     token = str(session_id or '').strip()
     if not token or token.startswith('proc:') or token.startswith('path:'):
         return None
-    base_root = root_dir.expanduser() if root_dir is not None else (Path.home() / '.clawchain-agent')
-    base_dir = base_root / account_id / 'codex' / token
-    config_path = base_dir / 'agent-proxy.config.json'
-    if not config_path.exists():
-        return None
-    launcher_path = codex_launcher_path(base_dir)
-    handoff_script = monitored_handoff_path(base_dir)
-    controlled_session_name = token.replace(':', '-').replace('/', '-').replace(' ', '-')[:48] or 'codex-session'
-    resume_command = script_command_display(launcher_path, "resume", token, keep_open=is_windows()) if launcher_path.exists() else f"codex resume {shlex.quote(token)}"
-    row = {
-        'agent_id': 'codex',
-        'session_id': token,
-        'session_name': token,
-        'session_fingerprint': f'resume:{token}',
-        'path_hint': None,
-        'config_path': str(config_path),
-        'session_state': 'monitored',
-        'capture_mode': 'rollout-observed',
-        'attach_command': resume_command if is_windows() else f'tmux attach -t {controlled_session_name}',
-        'controlled_session_name': controlled_session_name,
-        'handoff_command': script_command_display(handoff_script) if handoff_script.exists() else None,
-        'handoff_script_path': str(handoff_script) if handoff_script.exists() else None,
-        'last_seen_ts_ms': int(time.time() * 1000),
-    }
-    agent_proxy_cli._upsert_session_registry(account_id, row, root_dir=root_dir)
-    return row
+    for base_dir in _candidate_shell_agent_base_dirs(account_id=account_id, session_id=token, agent_id=agent_id, root_dir=root_dir):
+        config_path = base_dir / 'agent-proxy.config.json'
+        if not config_path.exists():
+            continue
+        try:
+            stored = agent_proxy_cli.load_agent_proxy_config(config_path)
+        except Exception:
+            continue
+        resolved_agent_id = agent_proxy_cli._stored_agent_id(stored=stored, config_path=config_path) or str(agent_id or '')
+        profile = get_shell_agent_profile(resolved_agent_id)
+        if profile is None:
+            continue
+        launcher_path = agent_launcher_path(base_dir, profile.agent_id)
+        handoff_script = monitored_handoff_path(base_dir)
+        controlled_session_name = token.replace(':', '-').replace('/', '-').replace(' ', '-')[:48] or 'clawchain-session'
+        resume_args = list(profile.resume_args(token))
+        if launcher_path.exists() and resume_args:
+            resume_command = script_command_display(launcher_path, *resume_args, keep_open=is_windows())
+        elif resume_args:
+            resume_command = command_display([profile.cli_command, *resume_args])
+        else:
+            resume_command = profile.cli_command
+        row = {
+            'agent_id': profile.agent_id,
+            'session_id': token,
+            'session_name': token,
+            'session_fingerprint': f'resume:{token}',
+            'path_hint': getattr(stored, 'path_hint', None),
+            'config_path': str(config_path),
+            'session_state': 'monitored',
+            'capture_mode': shell_agent_default_capture_mode(profile.agent_id),
+            'attach_command': resume_command if is_windows() else f'tmux attach -t {controlled_session_name}',
+            'controlled_session_name': controlled_session_name,
+            'handoff_command': script_command_display(handoff_script) if handoff_script.exists() else None,
+            'handoff_script_path': str(handoff_script) if handoff_script.exists() else None,
+            'last_seen_ts_ms': int(time.time() * 1000),
+        }
+        agent_proxy_cli._upsert_session_registry(account_id, row, root_dir=root_dir)
+        return row
+    return None
 
 
 def _promote_registry_session_identity(
@@ -2161,9 +2279,9 @@ def _promote_registry_session_identity(
     live_session_id = _immutable_session_id(item)
     if not _is_concrete_session_id(live_session_id):
         return matched
-    current_session_id = str(matched.get("session_id") or "")
-    if _is_concrete_session_id(current_session_id):
+    if _row_has_concrete_session_identity(matched):
         return matched
+    current_session_id = str(matched.get("session_id") or "")
     rows = agent_proxy_cli._load_session_registry(account_id, root_dir=root_dir)
     updated_row = {
         **matched,
@@ -2194,9 +2312,7 @@ def _promote_registry_session_identity(
     return updated_row
 
 
-def _ensure_codex_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object]:
-    if str(row.get('agent_id') or '') != 'codex':
-        return row
+def _ensure_shell_agent_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object]:
     config_path = Path(str(row.get('config_path') or '')).expanduser()
     if not config_path.exists():
         return row
@@ -2204,25 +2320,33 @@ def _ensure_codex_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object
         stored = agent_proxy_cli.load_agent_proxy_config(config_path)
     except Exception:
         return row
+    resolved_agent_id = agent_proxy_cli._stored_agent_id(stored=stored, config_path=config_path) or str(row.get('agent_id') or '')
+    profile = get_shell_agent_profile(resolved_agent_id)
+    if profile is None:
+        return row
     base_dir = Path(str(getattr(stored, 'base_dir', '') or '')).expanduser()
     if not base_dir:
         return row
-    env_path = codex_env_path(base_dir)
+    env_path = agent_env_path(base_dir, profile.agent_id)
     if env_path.exists():
         try:
             env_text = env_path.read_text(encoding='utf-8')
             if 'CLAWCHAIN_AGENT_PROXY_CONFIG=' in env_text:
-                return row
+                updated = dict(row)
+                updated['agent_id'] = profile.agent_id
+                updated['capture_mode'] = str(updated.get('capture_mode') or shell_agent_default_capture_mode(profile.agent_id))
+                return updated
         except Exception:
             pass
-    session_id = str(row.get('session_id') or getattr(stored, 'default_session_id', '') or 'codex-session')
-    run_id = str(getattr(stored, 'default_run_id', '') or 'codex-run')
+    session_id = str(row.get('session_id') or getattr(stored, 'default_session_id', '') or profile.default_session_id)
+    run_id = str(getattr(stored, 'default_run_id', '') or profile.default_run_id)
     workspace_root = None
     path_hint = str(row.get('path_hint') or getattr(stored, 'path_hint', '') or '').strip()
     if path_hint and path_hint != '-':
         workspace_root = Path(path_hint).expanduser()
     try:
-        artifacts = agent_proxy_cli.bootstrap_codex_cli_integration(
+        artifacts = agent_proxy_cli.bootstrap_shell_agent_integration(
+            agent_id=profile.agent_id,
             account_id=str(getattr(stored, 'account_id', '') or ''),
             password=str(getattr(stored, 'password', '') or ''),
             workspace_root=workspace_root,
@@ -2235,13 +2359,18 @@ def _ensure_codex_runtime_upgrade(*, row: dict[str, object]) -> dict[str, object
     except Exception:
         return row
     updated = dict(row)
+    updated['agent_id'] = profile.agent_id
     updated['config_path'] = str(artifacts.config_path)
-    launcher_path = codex_launcher_path(base_dir)
+    updated['capture_mode'] = str(updated.get('capture_mode') or shell_agent_default_capture_mode(profile.agent_id))
+    launcher_path = agent_launcher_path(base_dir, profile.agent_id)
     handoff_script = monitored_handoff_path(base_dir)
+    controlled_session_name = str(updated.get('controlled_session_name') or session_id).replace(':', '-').replace('/', '-').replace(' ', '-')[:48] or 'clawchain-session'
+    updated['controlled_session_name'] = controlled_session_name
+    resume_args = list(profile.resume_args(session_id))
     updated['attach_command'] = updated.get('attach_command') or (
-        script_command_display(launcher_path, "resume", session_id, keep_open=True)
-        if is_windows() and session_id and launcher_path.exists()
-        else (f"tmux attach -t {session_id}" if session_id else None)
+        script_command_display(launcher_path, *resume_args, keep_open=True)
+        if is_windows() and resume_args and launcher_path.exists()
+        else (f"tmux attach -t {controlled_session_name}" if controlled_session_name else None)
     )
     if handoff_script.exists():
         updated['handoff_script_path'] = str(handoff_script)
@@ -2254,7 +2383,8 @@ def _active_registry_rows(account_id: str, *, root_dir: Path | None = None) -> l
         row for row in agent_proxy_cli._load_session_registry(account_id, root_dir=root_dir)
         if not bool(row.get("archived"))
     ]
-    return [_ensure_codex_runtime_upgrade(row=row) for row in rows]
+    upgraded = [_ensure_shell_agent_runtime_upgrade(row=row) for row in rows]
+    return _dedupe_registry_rows(upgraded)
 
 
 def _archive_registry_session(*, account_id: str, session_ref: str, root_dir: Path | None = None) -> bool:
@@ -2292,10 +2422,11 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
     session_cards: list[dict[str, object]] = []
     for item in sessions:
         matched = agent_proxy_cli._registry_lookup(registry_rows=registry_rows, item=item)
-        if matched is None and str(item.get("agent_id") or "") == "codex":
-            restored = _restore_monitored_codex_row_from_disk(
+        if matched is None and shell_agent_supports_prepare(str(item.get("agent_id") or "")) and str(item.get("monitoring_status") or "") == "managed":
+            restored = _restore_monitored_shell_agent_row_from_disk(
                 account_id=account_id,
                 session_id=_immutable_session_id(item),
+                agent_id=str(item.get("agent_id") or "") or None,
                 root_dir=root_dir,
             )
             if restored is not None:
@@ -2305,6 +2436,7 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
         _auto_route_monitored_session(matched)
         control_state = _control_state_from_registry(matched)
         ui_status = _ui_status(control_state, live=True, matched=matched is not None)
+        monitoring_warning = _monitoring_warning_for_item(item, matched=matched)
         started_at = str(item.get("started_at") or "-")
         last_seen_ts_ms = _coherent_last_seen_ts_ms(
             started_at=started_at,
@@ -2318,6 +2450,8 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             "path_hint": item.get("path_hint"),
             "started_at": started_at,
             "status": ui_status,
+            "monitoring_status": item.get("monitoring_status"),
+            "monitoring_warning": monitoring_warning,
         })
         handoff_script_path, handoff_command = _upgrade_legacy_handoff_script(
             script_path=(matched or {}).get("handoff_script_path"),
@@ -2336,6 +2470,8 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             "agent_id": item.get("agent_id"),
             "status": ui_status,
             "control_state": control_state,
+            "monitoring_status": item.get("monitoring_status"),
+            "monitoring_warning": monitoring_warning,
             "capture_mode": capture_mode,
             "attach_command": _attach_command_for_row(matched, item),
             "handoff_command": handoff_command or (matched or {}).get("handoff_command"),
@@ -2343,7 +2479,7 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             "title": (matched or {}).get("session_name") or item.get("agent_id"),
             "live": True,
             "monitored": matched is not None,
-            "can_prepare": bool(item.get("path_hint")) or str(item.get("agent_id") or "") == "codex",
+            "can_prepare": bool(item.get("path_hint")) or shell_agent_supports_prepare(str(item.get("agent_id") or "")),
             "live_state": "running",
         })
     live_monitored_ids = {str(card.get("session_id") or "") for card in session_cards if card.get("session_id")}
@@ -2356,10 +2492,11 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
             script_path=row.get("handoff_script_path"),
             controlled_session_name=_resolve_controlled_session_name(row),
         )
+        session_ref = session_id if _row_has_concrete_session_identity(row) else str(row.get("session_fingerprint") or session_id or row.get("session_name") or row.get("agent_id") or "")
         session_cards.append({
-            "key": f"registry:{session_id or row.get('session_name') or row.get('agent_id')}",
-            "session_ref": session_id,
-            "session_id": row.get("session_id"),
+            "key": f"registry:{session_ref or row.get('session_name') or row.get('agent_id')}",
+            "session_ref": session_ref,
+            "session_id": row.get("session_id") if _row_has_concrete_session_identity(row) else (row.get("session_fingerprint") or row.get("session_id")),
             "session_name": row.get("session_name") or session_id or row.get("agent_id"),
             "session_fingerprint": row.get("session_fingerprint"),
             "path_hint": row.get("path_hint"),
@@ -2543,9 +2680,10 @@ def build_history_payload(
             )
         ]
     else:
-        target_rows = [row for row in registry_rows if str(row.get("agent_id") or "") == "codex"]
+        target_rows = [row for row in registry_rows if shell_agent_supports_prepare(str(row.get("agent_id") or ""))]
     for row in target_rows:
-        _backfill_codex_rollout_recovery(row=row)
+        if str(row.get("agent_id") or "") == "codex":
+            _backfill_codex_rollout_recovery(row=row)
     try:
         entries = agent_proxy_cli._collect_registry_review_entries(account_id=account_id, root_dir=root_dir)
     except TypeError:
@@ -2643,7 +2781,7 @@ def build_history_payload(
             if needle and (needle == str(row.get('session_id') or '') or needle.lower() == str(row.get('session_name') or '').lower())
         ]
     else:
-        target_rows = [row for row in registry_rows if str(row.get('agent_id') or '') == 'codex']
+        target_rows = [row for row in registry_rows if shell_agent_supports_prepare(str(row.get('agent_id') or ''))]
     for row in target_rows:
         session_id = str(row.get('session_id') or '')
         if not session_id or str(row.get('agent_id') or '') != 'codex':
@@ -2720,8 +2858,8 @@ def build_activity_payload(*, account_id: str, root_dir: Path | None = None, lim
             items.append(chosen)
     if session_id is not None and not items:
         registry_rows = _active_registry_rows(account_id, root_dir=root_dir)
-        matched = next((row for row in registry_rows if str(row.get('session_id') or '') == session_id and str(row.get('agent_id') or '') == 'codex'), None)
-        if matched is not None:
+        matched = next((row for row in registry_rows if str(row.get('session_id') or '') == session_id), None)
+        if matched is not None and str(matched.get('agent_id') or '') == 'codex':
             fallback = _collect_codex_sqlite_dangerous_history(
                 session_id=session_id,
                 session_name=str(matched.get('session_name') or session_id),
@@ -2745,8 +2883,14 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
         sessions=aggregate_running_agents(detect_running_agents(agent_filter="all"))
     )
     matched_registry = next((row for row in registry_rows if str(row.get("session_id") or "") == session_ref or str(row.get("session_fingerprint") or "") == session_ref), None)
-    if matched_registry is None:
-        restored = _restore_monitored_codex_row_from_disk(account_id=account_id, session_id=session_ref, root_dir=root_dir)
+    matched_running = next((
+        item for item in sessions
+        if str(item.get("session_fingerprint") or "") == session_ref
+        or _immutable_session_id(item) == session_ref
+        or str((agent_proxy_cli._registry_lookup(registry_rows=registry_rows, item=item) or {}).get("session_id") or "") == session_ref
+    ), None)
+    if matched_registry is None and (matched_running is None or str(matched_running.get("monitoring_status") or "") == "managed"):
+        restored = _restore_monitored_shell_agent_row_from_disk(account_id=account_id, session_id=session_ref, root_dir=root_dir)
         if restored is not None:
             registry_rows = _active_registry_rows(account_id, root_dir=root_dir)
             matched_registry = restored
@@ -2758,6 +2902,7 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
     ), None)
     matched_registry = _promote_registry_session_identity(account_id=account_id, registry_rows=registry_rows, matched=matched_registry, item=matched_running or {}, root_dir=root_dir)
     _auto_route_monitored_session(matched_registry)
+    monitoring_warning = _monitoring_warning_for_item(matched_running, matched=matched_registry)
     title = (matched_registry or {}).get("session_name") or _display_session_id((matched_running or {})) or session_ref
     history_items: list[dict[str, object]] = []
     activity_items: list[dict[str, object]] = []
@@ -2798,13 +2943,15 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
             "last_seen_label": _coherent_last_seen_label(started_at=started_at, last_seen_ts_ms=last_seen_ts_ms),
             "capture_mode": str((matched_registry or {}).get("capture_mode") or ("pending-handoff" if matched_registry is None else "launcher-routed")),
             "control_state": _control_state_from_registry(matched_registry),
+            "monitoring_status": (matched_running or {}).get("monitoring_status"),
+            "monitoring_warning": monitoring_warning,
             "attach_command": _attach_command_for_row(matched_registry, matched_running),
             "resume_command": _monitored_resume_command(matched_registry, matched_running),
             "handoff_command": detail_handoff_command or (matched_registry or {}).get("handoff_command"),
             "handoff_script_path": detail_handoff_script_path or (matched_registry or {}).get("handoff_script_path"),
             "agent_id": (matched_registry or {}).get("agent_id") or (matched_running or {}).get("agent_id"),
             "status": _ui_status(_control_state_from_registry(matched_registry), live=matched_running is not None, matched=matched_registry is not None),
-            "can_prepare": bool((matched_running or {}).get("path_hint")) or str((matched_registry or {}).get("agent_id") or (matched_running or {}).get("agent_id") or "") == "codex",
+            "can_prepare": bool((matched_running or {}).get("path_hint")) or shell_agent_supports_prepare(str((matched_registry or {}).get("agent_id") or (matched_running or {}).get("agent_id") or "")),
             "evidence": detail_evidence,
         },
         "history": history_items,
@@ -2933,7 +3080,7 @@ def perform_prepare_monitor_script(
     )
     for result in prepared:
         result["session_name"] = chosen_name
-        result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
+        result["capture_mode"] = result.get("capture_mode") or ("pending-handoff" if no_start_service else shell_agent_default_capture_mode(result.get("agent_id")))
         script_path, handoff_command = _build_handoff_script(item=picked, prepared_item=result)
         if script_path:
             result["handoff_script_path"] = script_path
@@ -3059,8 +3206,8 @@ def perform_onboard(
     )
     for result in prepared:
         result["session_name"] = chosen_name
-        result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
-        if str(picked.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
+        result["capture_mode"] = result.get("capture_mode") or ("pending-handoff" if no_start_service else shell_agent_default_capture_mode(result.get("agent_id")))
+        if shell_agent_supports_prepare(str(picked.get("agent_id") or "")) and result.get("prepared_payload") is not None:
             script_path, handoff_command = _build_handoff_script(item=picked, prepared_item=result)
             if script_path:
                 result["handoff_script_path"] = script_path
@@ -3142,8 +3289,8 @@ def perform_auto_onboard(
         )
         for result in prepared:
             result["session_name"] = chosen_name
-            result["capture_mode"] = "pending-handoff" if no_start_service else "rollout-observed"
-            if str(item.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
+            result["capture_mode"] = result.get("capture_mode") or ("pending-handoff" if no_start_service else shell_agent_default_capture_mode(result.get("agent_id")))
+            if shell_agent_supports_prepare(str(item.get("agent_id") or "")) and result.get("prepared_payload") is not None:
                 script_path, handoff_command = _build_handoff_script(item=item, prepared_item=result)
                 if script_path:
                     result["handoff_script_path"] = script_path

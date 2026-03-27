@@ -24,13 +24,15 @@ from .agent_proxy import (
     _default_foundry_bin_dir,
     _default_foundry_install_root,
 )
+from .agent_profiles import get_shell_agent_profile, normalize_shell_agent_id, shell_agent_supports_prepare
 from .agent_proxy_config import AgentProxyStoredConfig, load_agent_proxy_config, write_agent_proxy_config
 from .agent_proxy_daemon import AgentProxyDaemon, AgentProxyDaemonClient
-from .codex_integration import bootstrap_codex_cli_integration
 from .codex_rollout_monitor import start_codex_rollout_watcher
+from . import host_monitor as host_monitor_module
 from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents, monitor_agents
-from .platform_support import codex_command_matches, is_windows, script_command_display, script_command_parts
+from .platform_support import agent_command_matches, is_windows, script_command_display, script_command_parts
 from .real_agent_harness import build_real_agent_harness_plan
+from .shell_agent_integration import bootstrap_shell_agent_integration
 from .risk_catalog import risk_definition, risk_label
 from .runtime.anchor import (
     EvmChainProbe,
@@ -313,11 +315,10 @@ def _session_id_from_args_or_config(raw: str | None, *, stored: AgentProxyStored
 
 
 def _normalize_profile_id(agent_id: str) -> str:
+    profile = get_shell_agent_profile(agent_id)
+    if profile is not None:
+        return profile.profile_id
     mapping = {
-        "codex": "codex-cli",
-        "codex-cli": "codex-cli",
-        "claude": "claude-code",
-        "claude-code": "claude-code",
         "cursor": "cursor-agent",
         "cursor-agent": "cursor-agent",
         "openclaw": "openclaw",
@@ -327,6 +328,29 @@ def _normalize_profile_id(agent_id: str) -> str:
         "replit-agent": "replit-agent",
     }
     return mapping.get(agent_id, agent_id)
+
+
+def _stored_agent_id(*, stored: AgentProxyStoredConfig, config_path: Path | None = None) -> str | None:
+    direct = normalize_shell_agent_id(getattr(stored, "agent_id", None))
+    if direct is not None:
+        return direct
+    candidates: list[str] = []
+    if config_path is not None:
+        config_file = Path(config_path)
+        candidates.append(config_file.parent.name)
+        if config_file.parent.parent != config_file.parent:
+            candidates.append(config_file.parent.parent.name)
+    base_dir = str(getattr(stored, "base_dir", "") or "").strip()
+    if base_dir:
+        base_path = Path(base_dir)
+        candidates.append(base_path.name)
+        if base_path.parent != base_path:
+            candidates.append(base_path.parent.name)
+    for raw in candidates:
+        normalized = normalize_shell_agent_id(raw)
+        if normalized is not None:
+            return normalized
+    return None
 
 
 def _package_root_str() -> str:
@@ -2128,7 +2152,7 @@ def _prepare_detected_sessions(
     prepared: list[dict[str, object]] = []
     for item in sessions:
         path_hint = item.get("path_hint")
-        if not path_hint and str(item.get("agent_id")) != "codex":
+        if not path_hint and not shell_agent_supports_prepare(str(item.get("agent_id") or "")):
             prepared.append(
                 {
                     "agent_id": item["agent_id"],
@@ -2148,13 +2172,14 @@ def _prepare_detected_sessions(
         ]
         if path_hint:
             forwarded.extend(["--workspace", str(path_hint)])
-        if session_id_override:
-            forwarded.extend(["--session", session_id_override])
         session_slug = str(session_id_override or item.get("session_fingerprint") or "session").replace(":", "-").replace("/", "-").replace(" ", "-")
+        prepared_session_id = str(session_id_override or session_slug)
+        if prepared_session_id:
+            forwarded.extend(["--session", prepared_session_id])
         if root_dir is not None:
-            per_agent_root = root_dir / str(item["agent_id"]) / session_slug
+            per_agent_root = _default_account_root(account_id, root_dir=root_dir) / str(item["agent_id"]) / session_slug
             forwarded.extend(["--root-dir", str(per_agent_root)])
-        elif session_id_override:
+        elif prepared_session_id:
             default_root = Path.home() / ".clawchain-agent" / account_id / str(item["agent_id"]) / session_slug
             forwarded.extend(["--root-dir", str(default_root)])
         if no_start_service:
@@ -2175,8 +2200,8 @@ def _prepare_detected_sessions(
         prepared.append(
             {
                 "agent_id": item["agent_id"],
-                "session_id": session_id_override,
-                "session_name": session_id_override,
+                "session_id": prepared_session_id,
+                "session_name": prepared_session_id,
                 "session_fingerprint": item.get("session_fingerprint"),
                 "path_hint": path_hint,
                 "returncode": process.returncode,
@@ -2207,6 +2232,74 @@ def _auto_select_git_context_mode(*, item: dict[str, object]) -> str:
         check=False,
     )
     return "bind-existing-git" if probe.returncode == 0 else "managed-session-git"
+
+
+def _shell_agent_managed_match(
+    *,
+    agent_id: str,
+    config_path: str | None,
+    session_id: str | None,
+    path_hint: str | None,
+) -> dict[str, object] | None:
+    expected_config = str(config_path or '').strip()
+    expected_session = str(session_id or '').strip()
+    expected_path = str(path_hint or '').strip()
+    sessions = _coalesce_supervise_sessions(
+        sessions=aggregate_running_agents(detect_running_agents(agent_filter=agent_id))
+    )
+    for candidate in sessions:
+        if str(candidate.get('agent_id') or '') != agent_id:
+            continue
+        if str(candidate.get('monitoring_status') or '') != 'managed':
+            continue
+        candidate_path = str(candidate.get('path_hint') or '').strip()
+        if expected_path and candidate_path and candidate_path != expected_path:
+            continue
+        candidate_pids: list[int] = []
+        raw_pids = candidate.get('pids')
+        if isinstance(raw_pids, list):
+            candidate_pids = [int(pid) for pid in raw_pids if pid is not None]
+        elif candidate.get('pid') is not None:
+            candidate_pids = [int(candidate['pid'])]
+        for pid in candidate_pids:
+            managed_config = host_monitor_module._read_proc_env_var(pid, 'CLAWCHAIN_AGENT_PROXY_CONFIG')
+            managed_session = host_monitor_module._read_proc_env_var(pid, 'CLAWCHAIN_AGENT_SESSION_ID')
+            if expected_config and managed_config == expected_config:
+                return candidate
+            if expected_session and managed_session == expected_session:
+                return candidate
+    return None
+
+
+def _wait_for_shell_agent_takeover(
+    *,
+    agent_id: str,
+    config_path: str | None,
+    session_id: str | None,
+    path_hint: str | None,
+    timeout_sec: float = 6.0,
+) -> dict[str, object] | None:
+    deadline = time.time() + max(timeout_sec, 0.0)
+    while time.time() < deadline:
+        matched = _shell_agent_managed_match(
+            agent_id=agent_id,
+            config_path=config_path,
+            session_id=session_id,
+            path_hint=path_hint,
+        )
+        if matched is not None:
+            return matched
+        time.sleep(0.1)
+    return None
+
+
+def _record_shell_agent_takeover(*, prepared_item: dict[str, object], matched: dict[str, object]) -> None:
+    raw_pids = matched.get('pids')
+    if isinstance(raw_pids, list):
+        prepared_item['tracked_pids'] = [int(pid) for pid in raw_pids if pid is not None]
+    elif matched.get('pid') is not None:
+        prepared_item['tracked_pids'] = [int(matched['pid'])]
+    prepared_item['last_seen_ts_ms'] = int(time.time() * 1000)
 
 
 def _service_log_candidates(log_dir: Path) -> list[tuple[Path, Path]]:
@@ -2248,9 +2341,11 @@ def _open_service_log_files(log_dir: Path) -> tuple[Path, Path, object, object]:
     raise OSError("unable to open service log files")
 
 
-def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str, object]) -> bool:
+def _relaunch_shell_agent_session(*, item: dict[str, object], prepared_item: dict[str, object]) -> bool:
+    agent_id = str(prepared_item.get("agent_id") or item.get("agent_id") or "")
+    profile = get_shell_agent_profile(agent_id)
     launcher_path = prepared_item.get("launcher_path")
-    if not launcher_path:
+    if profile is None or not launcher_path:
         return False
     command_text = str(item.get("command_text") or item.get("sample_process_summary") or "")
     try:
@@ -2259,7 +2354,7 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
         tokens = command_text.split()
     if not tokens:
         return False
-    while tokens and not codex_command_matches(tokens[0]):
+    while tokens and not agent_command_matches(profile.agent_id, tokens[0]):
         tokens = tokens[1:]
     if not tokens:
         return False
@@ -2281,9 +2376,13 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
             time.sleep(0.05)
 
     tmux_bin = shutil.which("tmux")
-    session_name = str(prepared_item.get("session_id") or item.get("session_fingerprint") or "codex-session")
-    session_name = session_name.replace(":", "-").replace("/", "-").replace(" ", "-")[:48] or "codex-session"
+    session_name = str(prepared_item.get("session_id") or item.get("session_fingerprint") or profile.default_session_id)
+    session_name = session_name.replace(":", "-").replace("/", "-").replace(" ", "-")[:48] or "clawchain-session"
     prepared_item["controlled_session_name"] = session_name
+    expected_config_path = str(prepared_item.get("config_path") or "").strip()
+    expected_session_id = str(prepared_item.get("session_id") or item.get("session_fingerprint") or profile.default_session_id)
+    expected_path_hint = str(item.get("path_hint") or prepared_item.get("path_hint") or "").strip()
+
     if tmux_bin and not is_windows():
         launch_cmd = " ".join([shlex.quote("bash"), shlex.quote(str(launcher_path)), *[shlex.quote(part) for part in forwarded]])
         subprocess.run([tmux_bin, "kill-session", "-t", session_name], check=False, capture_output=True, text=True)
@@ -2297,9 +2396,18 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
         if created.returncode == 0:
             check = subprocess.run([tmux_bin, "has-session", "-t", session_name], check=False, capture_output=True, text=True)
             if check.returncode == 0:
-                prepared_item["attach_command"] = f"tmux attach -t {session_name}"
-                prepared_item["capture_mode"] = "tmux-routed"
-                return True
+                matched = _wait_for_shell_agent_takeover(
+                    agent_id=profile.agent_id,
+                    config_path=expected_config_path,
+                    session_id=expected_session_id,
+                    path_hint=expected_path_hint,
+                )
+                if matched is not None:
+                    prepared_item["attach_command"] = f"tmux attach -t {session_name}"
+                    prepared_item["capture_mode"] = "tmux-routed"
+                    _record_shell_agent_takeover(prepared_item=prepared_item, matched=matched)
+                    return True
+                subprocess.run([tmux_bin, "kill-session", "-t", session_name], check=False, capture_output=True, text=True)
 
     popen_kwargs: dict[str, object] = {
         "env": {**os.environ, "PYTHONPATH": _package_root_str()},
@@ -2320,13 +2428,31 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
     time.sleep(0.1)
     started = process.poll() is None
     if started:
-        prepared_item["capture_mode"] = "launcher-routed"
-        if is_windows():
-            session_id = str(prepared_item.get("session_id") or item.get("session_fingerprint") or "codex-session")
-            prepared_item["attach_command"] = script_command_display(launcher_path, "resume", session_id, keep_open=True)
-    else:
-        prepared_item["capture_mode"] = "pending-relaunch"
-    return started
+        matched = _wait_for_shell_agent_takeover(
+            agent_id=profile.agent_id,
+            config_path=expected_config_path,
+            session_id=expected_session_id,
+            path_hint=expected_path_hint,
+        )
+        if matched is not None:
+            prepared_item["capture_mode"] = "launcher-routed"
+            _record_shell_agent_takeover(prepared_item=prepared_item, matched=matched)
+            if is_windows():
+                resume_args = list(profile.resume_args(expected_session_id))
+                if resume_args:
+                    prepared_item["attach_command"] = script_command_display(launcher_path, *resume_args, keep_open=True)
+            return True
+        try:
+            if process.poll() is None:
+                _terminate_pid(int(process.pid), force=False)
+        except Exception:
+            pass
+    prepared_item["capture_mode"] = "pending-relaunch"
+    return False
+
+
+def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str, object]) -> bool:
+    return _relaunch_shell_agent_session(item=item, prepared_item=prepared_item)
 
 
 def _auto_prepare_candidates(*, sessions: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2334,7 +2460,7 @@ def _auto_prepare_candidates(*, sessions: list[dict[str, object]]) -> list[dict[
     for item in sessions:
         if item.get("monitoring_status") == "managed":
             continue
-        if not item.get("path_hint") and str(item.get("agent_id")) != "codex":
+        if not item.get("path_hint") and not shell_agent_supports_prepare(str(item.get("agent_id") or "")):
             continue
         candidates.append(item)
     return candidates
@@ -2691,8 +2817,8 @@ def _prompt_onboard_candidate(
     )
     for result in prepared:
         result["session_name"] = session_name
-        if str(item.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
-            result["relaunch_started"] = _relaunch_codex_session(item=item, prepared_item=result)
+        if shell_agent_supports_prepare(str(item.get("agent_id") or "")) and result.get("prepared_payload") is not None:
+            result["relaunch_started"] = _relaunch_shell_agent_session(item=item, prepared_item=result)
             result["capture_mode"] = result.get("capture_mode") or ("launcher-routed" if result["relaunch_started"] else "pending-relaunch")
     _persist_prepared_sessions(
         account_id=account_id,
@@ -2811,8 +2937,8 @@ def _run_onboard_interaction(
     )
     for result in prepared:
         result["session_name"] = session_name or session_id
-        if str(picked.get("agent_id")) == "codex" and result.get("prepared_payload") is not None:
-            result["relaunch_started"] = _relaunch_codex_session(item=picked, prepared_item=result)
+        if shell_agent_supports_prepare(str(picked.get("agent_id") or "")) and result.get("prepared_payload") is not None:
+            result["relaunch_started"] = _relaunch_shell_agent_session(item=picked, prepared_item=result)
             result["capture_mode"] = result.get("capture_mode") or ("launcher-routed" if result["relaunch_started"] else "pending-relaunch")
     _persist_prepared_sessions(
         account_id=account_id,
@@ -3017,20 +3143,24 @@ def main(argv: list[str] | None = None) -> int:
         if workspace_root is not None:
             workspace_root = workspace_root.expanduser().resolve()
         base_dir = (root_dir or (Path.home() / ".clawchain-agent" / account_id / profile_id)).expanduser().resolve()
-        if profile_id == "codex-cli":
-            artifacts = bootstrap_codex_cli_integration(
+        shell_profile = get_shell_agent_profile(profile_id)
+        if shell_profile is not None:
+            artifacts = bootstrap_shell_agent_integration(
+                agent_id=shell_profile.agent_id,
                 account_id=account_id,
                 password=password,
                 workspace_root=workspace_root,
                 base_dir=base_dir,
-                session_id=session_id or "codex-session",
-                run_id=run_id or "codex-run",
+                session_id=session_id or shell_profile.default_session_id,
+                run_id=run_id or shell_profile.default_run_id,
                 start_service=start_service,
                 git_context_mode=git_context_mode,
             )
+            launch_args = list(shell_profile.initial_launch_args(workspace_root))
             print(json.dumps({
                 "ok": True,
-                "profile_id": profile_id,
+                "agent_id": shell_profile.agent_id,
+                "profile_id": shell_profile.profile_id,
                 "session_scope": "agent-session",
                 "prepared": "full-integration",
                 "git_context_mode": git_context_mode,
@@ -3041,18 +3171,15 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "recovery_source_selection": "automatic",
                 "artifacts": artifacts.to_dict(),
-                "next_steps": (
-                    [script_command_display(artifacts.launcher_path, "-C", str(workspace_root), keep_open=is_windows())]
-                    if workspace_root is not None
-                    else [script_command_display(artifacts.launcher_path, keep_open=is_windows())]
-                ) + [
+                "next_steps": [
+                    script_command_display(artifacts.launcher_path, *launch_args, keep_open=is_windows()),
                     (
                         f'set "CLAWCHAIN_AGENT_PROXY_CONFIG={artifacts.config_path}" && '
                         f'set "PYTHONPATH={_package_root_str()};%PYTHONPATH%" && '
-                        "python -m clawchain.agent_proxy_cli watch codex"
+                        f"python -m clawchain.agent_proxy_cli watch {shell_profile.agent_id}"
                         if is_windows()
                         else f"env CLAWCHAIN_AGENT_PROXY_CONFIG={artifacts.config_path} "
-                        f"PYTHONPATH={_package_root_str()} python -m clawchain.agent_proxy_cli watch codex"
+                        f"PYTHONPATH={_package_root_str()} python -m clawchain.agent_proxy_cli watch {shell_profile.agent_id}"
                     ),
                 ],
             }, ensure_ascii=True, indent=2))
@@ -4294,6 +4421,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         config_path = Path(args[1])
         stored = load_agent_proxy_config(config_path)
+        agent_id = _stored_agent_id(stored=stored, config_path=config_path)
+        shell_profile = get_shell_agent_profile(agent_id)
         watcher_stop = None
         watcher_thread = None
         workspace_root = Path(stored.path_hint).expanduser() if stored.path_hint else None
@@ -4303,13 +4432,13 @@ def main(argv: list[str] | None = None) -> int:
             session_id=stored.default_session_id,
             run_id=stored.default_run_id,
         )
-        if stored.default_session_id:
+        if shell_profile is not None and shell_profile.watcher_kind == "codex-rollout" and stored.default_session_id:
             watcher_stop, watcher_thread = start_codex_rollout_watcher(
                 proxy=daemon.proxy,
                 lock=daemon.lock,
                 session_id=stored.default_session_id,
                 run_id=stored.default_run_id,
-                actor_id="codex",
+                actor_id=shell_profile.agent_id,
                 workspace_root=workspace_root,
             )
         state = {
@@ -4409,7 +4538,7 @@ def main(argv: list[str] | None = None) -> int:
                 [python_exec, "-m", "clawchain.agent_proxy_cli", "serve", str(config_path)],
                 **popen_kwargs,
             )
-        deadline = time.time() + 5.0
+        deadline = time.time() + 10.0
         while time.time() < deadline:
             if state_path.exists():
                 break
