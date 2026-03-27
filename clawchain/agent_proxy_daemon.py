@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import socket
 import socketserver
@@ -30,6 +31,14 @@ def _daemon_socket_path(base_dir: Path) -> Path:
     return Path(tempfile.gettempdir()) / f"occp-daemon-{uuid.uuid4().hex[:10]}.sock"
 
 
+def _endpoint_uses_tcp(endpoint: str | Path) -> bool:
+    return str(endpoint).startswith("tcp://")
+
+
+def _tcp_endpoint(host: str, port: int) -> str:
+    return f"tcp://{host}:{port}"
+
+
 @dataclass(frozen=True)
 class AgentProxyDaemonArtifacts:
     socket_path: str
@@ -40,8 +49,8 @@ class AgentProxyDaemonArtifacts:
 @dataclass
 class AgentProxyDaemon:
     proxy: TransparentAgentProxy
-    socket_path: Path
-    server: socketserver.UnixStreamServer
+    socket_path: str
+    server: socketserver.BaseServer
     thread: threading.Thread
     lock: threading.Lock
 
@@ -55,14 +64,7 @@ class AgentProxyDaemon:
     ) -> tuple["AgentProxyDaemon", AgentProxyDaemonArtifacts]:
         proxy = TransparentAgentProxy.create(config)
         artifacts = proxy.prepare_launch_artifacts(session_id=session_id, run_id=run_id)
-        socket_path = _daemon_socket_path(proxy.paths.base_dir)
-        socket_path.parent.mkdir(parents=True, exist_ok=True)
-        if socket_path.exists():
-            socket_path.unlink()
         lock = threading.Lock()
-
-        class ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-            daemon_threads = True
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self) -> None:
@@ -161,14 +163,31 @@ class AgentProxyDaemon:
                 body = json.dumps(payload, ensure_ascii=True).encode("utf-8") + b"\n"
                 self.wfile.write(body)
 
-        server = ThreadingUnixStreamServer(str(socket_path), Handler)
+        if os.name == "nt":
+            class ThreadingTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+                daemon_threads = True
+                allow_reuse_address = True
+
+            server = ThreadingTcpServer(("127.0.0.1", 0), Handler)
+            socket_path = _tcp_endpoint("127.0.0.1", int(server.server_address[1]))
+        else:
+            socket_path_path = _daemon_socket_path(proxy.paths.base_dir)
+            socket_path_path.parent.mkdir(parents=True, exist_ok=True)
+            if socket_path_path.exists():
+                socket_path_path.unlink()
+
+            class ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+                daemon_threads = True
+
+            server = ThreadingUnixStreamServer(str(socket_path_path), Handler)
+            socket_path = str(socket_path_path)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         daemon = cls(proxy=proxy, socket_path=socket_path, server=server, thread=thread, lock=lock)
         client = AgentProxyDaemonClient(socket_path)
         client.ping()
         return daemon, AgentProxyDaemonArtifacts(
-            socket_path=str(socket_path),
+            socket_path=socket_path,
             env_path=artifacts.env_path,
             wrapper_path=artifacts.wrapper_path,
         )
@@ -177,14 +196,16 @@ class AgentProxyDaemon:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
-        if self.socket_path.exists():
-            self.socket_path.unlink()
+        if not _endpoint_uses_tcp(self.socket_path):
+            socket_path = Path(self.socket_path)
+            if socket_path.exists():
+                socket_path.unlink()
         self.proxy.close()
 
 
 @dataclass(frozen=True)
 class AgentProxyDaemonClient:
-    socket_path: Path
+    socket_path: str | Path
 
     def ping(self) -> dict[str, object]:
         return self._round_trip({"action": "ping"})
@@ -218,8 +239,18 @@ class AgentProxyDaemonClient:
         )
 
     def _round_trip(self, payload: dict[str, object]) -> dict[str, object]:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.connect(str(self.socket_path))
+        endpoint = str(self.socket_path).strip()
+        if not endpoint:
+            raise ValueError("socket endpoint missing")
+        if _endpoint_uses_tcp(endpoint):
+            host, port_text = endpoint.removeprefix("tcp://").rsplit(":", 1)
+            family = socket.AF_INET
+            address: tuple[str, int] | str = (host, int(port_text))
+        else:
+            family = socket.AF_UNIX
+            address = endpoint
+        with socket.socket(family, socket.SOCK_STREAM) as client:
+            client.connect(address)
             client.sendall(json.dumps(payload, ensure_ascii=True).encode("utf-8") + b"\n")
             chunks: list[bytes] = []
             while True:

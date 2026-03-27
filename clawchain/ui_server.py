@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from . import agent_proxy_cli
 from .agent_proxy import AgentProxyPaths, TransparentAgentProxy
 from . import codex_rollout
-from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents
+from .host_monitor import aggregate_running_agents, detect_running_agents, list_known_agents, _parse_started_at_epoch
 from .platform_support import (
     codex_command_matches,
     codex_env_path,
@@ -41,6 +41,23 @@ from .system import ClawChainPaths
 UI_DEFAULT_ACCOUNT_ID = "local-operator"
 UI_DEFAULT_PASSWORD = "local-operator"
 UI_BUILD_LABEL = "ClawChain UI Build 2026-03-22A"
+
+
+def _coherent_last_seen_ts_ms(*, started_at: str | None, last_seen_ts_ms: int | None) -> int:
+    seen_ms = int(last_seen_ts_ms or 0)
+    started_epoch = _parse_started_at_epoch(started_at)
+    started_ms = started_epoch * 1000 if started_epoch is not None else 0
+    if seen_ms and started_ms:
+        return max(seen_ms, started_ms)
+    return seen_ms or started_ms
+
+
+def _coherent_last_seen_label(*, started_at: str | None, last_seen_ts_ms: int | None) -> str:
+    effective_ms = _coherent_last_seen_ts_ms(started_at=started_at, last_seen_ts_ms=last_seen_ts_ms)
+    if effective_ms:
+        return agent_proxy_cli._format_ts_label(effective_ms)
+    token = str(started_at or '').strip()
+    return token or '-'
 
 
 def render_index_html() -> str:
@@ -1167,8 +1184,14 @@ def render_index_html() -> str:
     }
 
     async function boot() {
+      let bootstrapWarning = '';
       try {
         await loadAgents();
+      } catch (err) {
+        setStatus(`UI bootstrap failed: ${err.message}`);
+        return;
+      }
+      try {
         await api('/api/deploy', {
           method: 'POST',
           body: JSON.stringify({
@@ -1177,6 +1200,11 @@ def render_index_html() -> str:
             no_start_service: true
           })
         });
+      } catch (err) {
+        bootstrapWarning = `Deploy bootstrap skipped: ${err.message}`;
+        pushToast(bootstrapWarning, 'warn');
+      }
+      try {
         const savedView = (() => { try { return window.localStorage.getItem('clawchain-current-view') || 'dashboard'; } catch (_) { return 'dashboard'; } })();
         setView(savedView);
         await refreshAll({quiet: true});
@@ -1188,7 +1216,7 @@ def render_index_html() -> str:
           loadHistory({quiet: true}),
           selectedSessionRef ? loadSessionDetail(selectedSessionRef, {quiet: true}) : Promise.resolve(),
         ]);
-        setStatus(`ClawChain dashboard ready.`);
+        setStatus(bootstrapWarning ? `ClawChain dashboard ready. ${bootstrapWarning}` : 'ClawChain dashboard ready.');
         setInterval(() => { refreshAll({quiet: true}).catch(err => setStatus(`Session refresh failed: ${err.message}`)); }, 4000);
         setInterval(() => { loadActivity({quiet: true}).catch(err => setStatus(`Activity refresh failed: ${err.message}`)); }, 5000);
         setInterval(() => { loadHistory({quiet: true}).catch(err => setStatus(`History refresh failed: ${err.message}`)); }, 6000);
@@ -1724,6 +1752,31 @@ def _attach_command_for_row(row: dict[str, object] | None, running_item: dict[st
     return f"tmux attach -t {controlled}" if controlled else None
 
 
+def _proof_export_timestamp() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _normalize_export_history_targets(*, history: list[dict[str, object]], proof_cards: list[dict[str, object]]) -> list[dict[str, object]]:
+    target_by_key: dict[tuple[str, str], str] = {}
+    for card in proof_cards:
+        session_id = str(card.get("session_id") or "")
+        impact_set_id = str(card.get("impact_set_id") or "")
+        target_root = str(card.get("target_root") or "").strip()
+        if session_id and impact_set_id and target_root:
+            target_by_key[(session_id, impact_set_id)] = target_root
+    normalized: list[dict[str, object]] = []
+    for item in history:
+        current = dict(item)
+        key = (str(current.get("session_id") or ""), str(current.get("impact_set_id") or ""))
+        replacement = target_by_key.get(key)
+        current_target = str(current.get("target_root") or "").strip()
+        if replacement and current_target != replacement:
+            if not current_target or Path(current_target).name == Path(replacement).name:
+                current["target_root"] = replacement
+        normalized.append(current)
+    return normalized
+
+
 def export_readable_proof_log(*, account_id: str, session_ref: str, password: str = "", root_dir: Path | None = None) -> dict[str, object]:
     detail_payload = build_session_detail_payload(account_id=account_id, session_ref=session_ref, root_dir=root_dir)
     detail = dict(detail_payload.get("detail") or {})
@@ -1738,9 +1791,10 @@ def export_readable_proof_log(*, account_id: str, session_ref: str, password: st
     for row in entries:
         if str(row.get("session_id") or "") == session_id:
             proof_cards.append(agent_proxy_cli._build_proof_card(row))
+    history = _normalize_export_history_targets(history=history, proof_cards=proof_cards)
     export_payload = {
         "format": "clawchain-proof-log.v2",
-        "exported_at": agent_proxy_cli._format_ts_label(int(time.time() * 1000)),
+        "exported_at": _proof_export_timestamp(),
         "account_id": account_id,
         "session": detail,
         "session_dangerous_operations": history,
@@ -2252,8 +2306,11 @@ def build_sessions_payload(*, account_id: str, agent_filter: str = "all", root_d
         control_state = _control_state_from_registry(matched)
         ui_status = _ui_status(control_state, live=True, matched=matched is not None)
         started_at = str(item.get("started_at") or "-")
-        last_seen_ts_ms = int((matched or {}).get("last_seen_ts_ms") or 0)
-        last_seen_label = agent_proxy_cli._format_ts_label(last_seen_ts_ms) if last_seen_ts_ms else started_at
+        last_seen_ts_ms = _coherent_last_seen_ts_ms(
+            started_at=started_at,
+            last_seen_ts_ms=(matched or {}).get("last_seen_ts_ms"),
+        )
+        last_seen_label = _coherent_last_seen_label(started_at=started_at, last_seen_ts_ms=last_seen_ts_ms)
         capture_mode = str((matched or {}).get("capture_mode") or ("pending-handoff" if matched is None else "launcher-routed"))
         running.append({
             "agent_id": item.get("agent_id"),
@@ -2401,7 +2458,7 @@ def _build_recovery_event_index(*, event_store_path: Path, session_id: str) -> d
     }
 
 
-def _build_evidence_payload(*, config_file: Path, recovery_ids: tuple[str, ...]) -> dict[str, object]:
+def _build_evidence_payload(*, config_file: Path, recovery_ids: tuple[str, ...], session_id: object = None) -> dict[str, object]:
     try:
         stored = agent_proxy_cli.load_agent_proxy_config(config_file)
     except Exception:  # noqa: BLE001
@@ -2421,7 +2478,7 @@ def _build_evidence_payload(*, config_file: Path, recovery_ids: tuple[str, ...])
     selected_locators = [locator_by_id[rid] for rid in recovery_ids if rid in locator_by_id]
     source_kinds = sorted({row.source_kind for row in selected_locators})
     snapshot_locations = [
-        str(chain_paths.vault_root / row.recovery_id)
+        str(chain_paths.vault_root / "recovery-snapshots" / row.recovery_id)
         for row in selected_locators
         if row.source_kind == "snapshot"
     ]
@@ -2441,7 +2498,13 @@ def _build_evidence_payload(*, config_file: Path, recovery_ids: tuple[str, ...])
     related_submissions = _related(submission_rows)
     latest_receipt = related_receipts[-1] if related_receipts else (receipt_rows[-1] if receipt_rows else {})
     latest_submission = related_submissions[-1] if related_submissions else (submission_rows[-1] if submission_rows else {})
-    metadata = dict(latest_receipt.get("metadata") or {})
+    metadata = dict(latest_receipt.get("metadata") or latest_submission.get("metadata") or {})
+    anchor_fields = agent_proxy_cli._resolve_anchor_fields(
+        config_file=config_file,
+        session_id=session_id,
+        latest_receipt=latest_receipt,
+        latest_submission=latest_submission,
+    )
     return {
         "config_path": str(config_file),
         "base_dir": str(base_path),
@@ -2455,9 +2518,7 @@ def _build_evidence_payload(*, config_file: Path, recovery_ids: tuple[str, ...])
         "source_kinds": source_kinds,
         "git_recovery_ids": git_recovery_ids,
         "snapshot_locations": snapshot_locations,
-        "anchor_mode": latest_receipt.get("anchor_mode") or latest_submission.get("anchor_mode"),
-        "anchor_backend": latest_receipt.get("anchor_backend") or latest_submission.get("anchor_backend"),
-        "anchor_reference": latest_receipt.get("anchor_reference") or latest_submission.get("anchor_reference"),
+        **anchor_fields,
         "encrypted_bundle_ref": metadata.get("encrypted_bundle_ref"),
     }
 
@@ -2529,6 +2590,7 @@ def build_history_payload(
                     evidence = _build_evidence_payload(
                         config_file=config_file,
                         recovery_ids=tuple(item.get("recovery_ids", ()) or ()),
+                        session_id=item.get("session_id"),
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -2709,9 +2771,16 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
     elif matched_registry:
         config_path = str((matched_registry or {}).get("config_path") or "")
         if config_path:
-            detail_evidence = _build_evidence_payload(config_file=Path(config_path), recovery_ids=())
+            detail_evidence = _build_evidence_payload(
+                config_file=Path(config_path),
+                recovery_ids=(),
+                session_id=session_id,
+            )
     started_at = str((matched_running or {}).get("started_at") or "-")
-    last_seen_ts_ms = int((matched_registry or {}).get("last_seen_ts_ms") or 0)
+    last_seen_ts_ms = _coherent_last_seen_ts_ms(
+        started_at=started_at,
+        last_seen_ts_ms=(matched_registry or {}).get("last_seen_ts_ms"),
+    )
     detail_handoff_script_path, detail_handoff_command = _upgrade_legacy_handoff_script(
         script_path=(matched_registry or {}).get("handoff_script_path"),
         controlled_session_name=_resolve_controlled_session_name(matched_registry),
@@ -2726,7 +2795,7 @@ def build_session_detail_payload(*, account_id: str, session_ref: str, root_dir:
             "session_fingerprint": (matched_registry or {}).get("session_fingerprint") or (matched_running or {}).get("session_fingerprint"),
             "path_hint": (matched_registry or {}).get("path_hint") or (matched_running or {}).get("path_hint"),
             "started_at": started_at,
-            "last_seen_label": agent_proxy_cli._format_ts_label(last_seen_ts_ms) if last_seen_ts_ms else started_at,
+            "last_seen_label": _coherent_last_seen_label(started_at=started_at, last_seen_ts_ms=last_seen_ts_ms),
             "capture_mode": str((matched_registry or {}).get("capture_mode") or ("pending-handoff" if matched_registry is None else "launcher-routed")),
             "control_state": _control_state_from_registry(matched_registry),
             "attach_command": _attach_command_for_row(matched_registry, matched_running),
@@ -3422,19 +3491,171 @@ class ClawChainUIHandler(BaseHTTPRequestHandler):
         return None
 
 
+def _address_matches_port(address: str, port: int) -> bool:
+    return str(address).strip().endswith(f":{port}")
+
+
+
+def _listener_pids_for_port_unix(port: int) -> list[int]:
+    ss_bin = shutil.which("ss")
+    if ss_bin:
+        try:
+            probe = subprocess.run(
+                [ss_bin, "-ltnp"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            probe = None
+        if probe is not None and probe.returncode == 0:
+            pids: set[int] = set()
+            for line in probe.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local_address = parts[3]
+                if not _address_matches_port(local_address, port):
+                    continue
+                for match in re.finditer(r"pid=(\d+)", line):
+                    try:
+                        pids.add(int(match.group(1)))
+                    except ValueError:
+                        continue
+            if pids:
+                return sorted(pids)
+    lsof_bin = shutil.which("lsof")
+    if lsof_bin:
+        try:
+            probe = subprocess.run(
+                [lsof_bin, "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            probe = None
+        if probe is not None and probe.returncode == 0:
+            pids = []
+            for raw in probe.stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    pids.append(int(raw))
+                except ValueError:
+                    continue
+            if pids:
+                return sorted(set(pids))
+    return []
+
+
+
+def _listener_pids_for_port_windows(port: int) -> list[int]:
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    candidates = []
+    resolved = shutil.which("netstat")
+    if resolved:
+        candidates.append(resolved)
+    static = system_root / "System32" / "netstat.exe"
+    if static.exists():
+        candidates.append(str(static))
+    seen: set[str] = set()
+    pids: set[int] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [candidate, "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            continue
+        if probe.returncode != 0:
+            continue
+        for line in probe.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            local_address = parts[1]
+            state = parts[3]
+            pid_text = parts[4]
+            if state.upper() != "LISTENING":
+                continue
+            if not _address_matches_port(local_address, port):
+                continue
+            try:
+                pids.add(int(pid_text))
+            except ValueError:
+                continue
+    return sorted(pids)
+
+
+
+def _listener_pids_for_port(port: int) -> list[int]:
+    if port <= 0:
+        return []
+    if os.name == "nt":
+        return _listener_pids_for_port_windows(port)
+    return _listener_pids_for_port_unix(port)
+
+
+
+def _replace_existing_listener(port: int) -> list[int]:
+    current_pid = os.getpid()
+    victim_pids = [pid for pid in _listener_pids_for_port(port) if pid != current_pid]
+    for pid in victim_pids:
+        agent_proxy_cli._terminate_pid(pid, force=False)
+    if victim_pids:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            remaining = [pid for pid in _listener_pids_for_port(port) if pid != current_pid]
+            if not remaining:
+                break
+            time.sleep(0.1)
+    return victim_pids
+
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv or [])
     host = "127.0.0.1"
     port = 8765
+    replace_existing = False
     index = 0
     while index < len(args):
         if args[index] == "--host" and index + 1 < len(args):
             host = str(args[index + 1]); index += 2; continue
         if args[index] == "--port" and index + 1 < len(args):
             port = int(args[index + 1]); index += 2; continue
+        if args[index] == "--replace-existing":
+            replace_existing = True; index += 1; continue
+        if args[index] == "--no-replace-existing":
+            replace_existing = False; index += 1; continue
         print(f"unknown option: {args[index]}")
         return 2
-    server = ThreadingHTTPServer((host, port), ClawChainUIHandler)
+    if replace_existing:
+        victim_pids = _replace_existing_listener(port)
+        if victim_pids:
+            print(f"[clawchain] replaced existing listener on port {port}: {', '.join(str(pid) for pid in victim_pids)}")
+    try:
+        class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+            allow_reuse_address = True
+
+        server = ReusableThreadingHTTPServer((host, port), ClawChainUIHandler)
+    except OSError as exc:
+        print(f"[clawchain] failed to start UI on http://{host}:{port}: {exc}")
+        return 1
     print(f"[clawchain] UI available at http://{host}:{port}")
     try:
         server.serve_forever()
