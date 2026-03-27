@@ -3,25 +3,37 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import hmac
+import json
 import os
+import platform
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
+import sys
+import tarfile
 import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
+import zipfile
 
 from .canonical.events import CanonicalEvent, EventType
 from .runtime.anchor import (
     EvmAnchorBackend,
     EvmAnchorConfig,
+    EvmDeploymentManifest,
     LocalAnchorBackend,
     RpcEvmBroadcaster,
     load_evm_deployment_manifest,
+    resolve_commitment_anchor_abi_path,
+    resolve_commitment_anchor_source_path,
     verify_evm_deployment_manifest,
+    write_evm_deployment_manifest,
 )
 from .runtime.remote import LocalAppendOnlyEvidenceSink, RemoteEvidenceSink, UnixSocketEvidenceSink
 from .runtime.sidecar_service import SidecarServiceConfig, build_sidecar_unix_server
@@ -64,9 +76,493 @@ def _run_git_probe(args: list[str], cwd: Path) -> subprocess.CompletedProcess[st
     )
 
 
-def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subprocess.Popen[str] | None]:
+def _default_foundry_install_root(base_dir: Path) -> Path:
+    return base_dir / "toolchains" / "foundry"
+
+
+def _default_foundry_bin_dir(base_dir: Path) -> Path:
+    return _default_foundry_install_root(base_dir) / "bin"
+
+
+def _foundry_binary_candidates(tool_name: str) -> tuple[str, ...]:
     if os.name == "nt":
+        return (f"{tool_name}.exe", tool_name)
+    return (tool_name,)
+
+
+def _existing_executable(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    candidate = Path(path_value).expanduser()
+    if candidate.exists() and candidate.is_file():
+        return str(candidate.resolve())
+    return None
+
+
+def _find_foundry_binary(
+    tool_name: str,
+    *,
+    explicit_path: str | None = None,
+    search_dirs: tuple[Path, ...] = (),
+) -> str | None:
+    explicit = _existing_executable(explicit_path)
+    if explicit is not None:
+        return explicit
+    for directory in search_dirs:
+        for candidate_name in _foundry_binary_candidates(tool_name):
+            candidate = directory / candidate_name
+            if candidate.exists() and candidate.is_file():
+                return str(candidate.resolve())
+    for candidate_name in _foundry_binary_candidates(tool_name):
+        resolved = shutil.which(candidate_name)
+        if resolved:
+            return str(Path(resolved).resolve())
+    return None
+
+
+def _foundry_release_os_tokens() -> tuple[str, ...]:
+    if os.name == "nt":
+        return ("windows", "win32")
+    if sys.platform == "darwin":
+        return ("darwin",)
+    return ("linux",)
+
+
+def _foundry_release_arch_tokens() -> tuple[str, ...]:
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        return ("amd64", "x86_64")
+    if machine in {"arm64", "aarch64"}:
+        return ("arm64", "aarch64")
+    return (machine,)
+
+
+def _load_latest_foundry_release() -> dict[str, object]:
+    request = Request(
+        "https://api.github.com/repos/foundry-rs/foundry/releases/latest",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "clawchain-foundry-bootstrap",
+        },
+    )
+    with urlopen(request, timeout=30) as response:  # noqa: S310
+        return dict(json.loads(response.read().decode("utf-8")))
+
+
+def _select_foundry_release_asset(release_payload: dict[str, object]) -> dict[str, object]:
+    assets = list(release_payload.get("assets") or [])
+    os_tokens = _foundry_release_os_tokens()
+    arch_tokens = _foundry_release_arch_tokens()
+    archive_suffixes = (".zip",) if os.name == "nt" else (".tar.gz", ".tgz")
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "")
+        lowered = name.lower()
+        if not lowered.endswith(archive_suffixes):
+            continue
+        if not any(token in lowered for token in os_tokens):
+            continue
+        if not any(token in lowered for token in arch_tokens):
+            continue
+        if any(token in lowered for token in ("attestation", "checksums", "sha256", "provenance", "sbom")):
+            continue
+        return asset
+    raise RuntimeError(
+        f"No Foundry release asset matched platform {' or '.join(os_tokens)} / {' or '.join(arch_tokens)}."
+    )
+
+
+def _download_url_to_path(url: str, destination: Path) -> Path:
+    request = Request(url, headers={"User-Agent": "clawchain-foundry-bootstrap"})
+    with urlopen(request, timeout=60) as response, destination.open("wb") as output:  # noqa: S310
+        shutil.copyfileobj(response, output)
+    return destination
+
+
+def _extract_foundry_archive(archive_path: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    lowered = archive_path.name.lower()
+    if lowered.endswith(".zip"):
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(destination)
+        return
+    if lowered.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive_path, "r:gz") as archive:
+            archive.extractall(destination)
+        return
+    raise RuntimeError(f"Unsupported Foundry archive format: {archive_path.name}")
+
+
+def _find_extracted_foundry_binary(root: Path, tool_name: str) -> Path | None:
+    matches: list[Path] = []
+    for candidate_name in _foundry_binary_candidates(tool_name):
+        matches.extend(path for path in root.rglob(candidate_name) if path.is_file())
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (len(item.parts), len(str(item))))
+    return matches[0]
+
+
+def _install_foundry_release(base_dir: Path) -> Path:
+    install_root = _default_foundry_install_root(base_dir)
+    bin_dir = _default_foundry_bin_dir(base_dir)
+    release_payload = _load_latest_foundry_release()
+    asset = _select_foundry_release_asset(release_payload)
+    asset_name = str(asset.get("name") or "foundry-archive")
+    download_url = str(asset.get("browser_download_url") or "")
+    if not download_url:
+        raise RuntimeError("Foundry release asset is missing browser_download_url.")
+    tmp_root = Path(tempfile.mkdtemp(prefix="clawchain-foundry-"))
+    try:
+        archive_path = _download_url_to_path(download_url, tmp_root / asset_name)
+        extract_root = tmp_root / "extract"
+        _extract_foundry_archive(archive_path, extract_root)
+        resolved: dict[str, Path] = {}
+        for tool_name in ("anvil", "forge", "cast", "chisel"):
+            binary = _find_extracted_foundry_binary(extract_root, tool_name)
+            if binary is not None:
+                resolved[tool_name] = binary
+        missing = [tool_name for tool_name in ("anvil", "forge") if tool_name not in resolved]
+        if missing:
+            raise RuntimeError(f"Downloaded Foundry archive is missing required tools: {', '.join(missing)}")
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for tool_name, source in resolved.items():
+            target_name = f"{tool_name}.exe" if os.name == "nt" else tool_name
+            target = bin_dir / target_name
+            shutil.copy2(source, target)
+            if os.name != "nt":
+                target.chmod(target.stat().st_mode | 0o755)
+        metadata = {
+            "tag_name": release_payload.get("tag_name"),
+            "asset_name": asset_name,
+            "download_url": download_url,
+            "installed_at_ms": int(time.time() * 1000),
+        }
+        install_root.mkdir(parents=True, exist_ok=True)
+        (install_root / "install.json").write_text(json.dumps(metadata, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+        return bin_dir
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def _ensure_foundry_binaries(
+    *,
+    base_dir: Path,
+    config: "AgentProxyConfig | None",
+    required_tools: tuple[str, ...],
+) -> dict[str, object]:
+    install_root = _default_foundry_install_root(base_dir)
+    install_error_path = install_root / "install-error.json"
+    managed_bin_dir = _default_foundry_bin_dir(base_dir)
+    search_dirs = (managed_bin_dir,) if managed_bin_dir.exists() else ()
+    tool_paths: dict[str, str | None] = {}
+    for tool_name in required_tools:
+        explicit_path = getattr(config, f"{tool_name}_path", None) if config is not None else None
+        tool_paths[tool_name] = _find_foundry_binary(tool_name, explicit_path=explicit_path, search_dirs=search_dirs)
+    missing = [tool_name for tool_name, value in tool_paths.items() if value is None]
+    install_attempted = False
+    install_error = None
+    auto_install_enabled = True if config is None else bool(config.auto_install_foundry)
+    if missing and auto_install_enabled:
+        install_attempted = True
+        try:
+            _install_foundry_release(base_dir)
+            if install_error_path.exists():
+                install_error_path.unlink()
+        except Exception as exc:  # noqa: BLE001
+            install_error = str(exc)
+            install_root.mkdir(parents=True, exist_ok=True)
+            install_error_path.write_text(
+                json.dumps(
+                    {
+                        "error": install_error,
+                        "missing_tools": list(missing),
+                        "base_dir": str(base_dir),
+                        "recorded_at_ms": int(time.time() * 1000),
+                    },
+                    ensure_ascii=True,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        search_dirs = (managed_bin_dir,) if managed_bin_dir.exists() else ()
+        for tool_name in missing:
+            explicit_path = getattr(config, f"{tool_name}_path", None) if config is not None else None
+            tool_paths[tool_name] = _find_foundry_binary(tool_name, explicit_path=explicit_path, search_dirs=search_dirs)
+    return {
+        "bin_dir": managed_bin_dir if managed_bin_dir.exists() else None,
+        "install_attempted": install_attempted,
+        "install_error": install_error,
+        "install_error_path": str(install_error_path) if install_error_path.exists() else None,
+        **{f"{tool_name}_path": tool_paths.get(tool_name) for tool_name in required_tools},
+    }
+
+
+def _prepare_foundry_env(
+    *,
+    base_dir: Path,
+    config: "AgentProxyConfig | None",
+    env: dict[str, str],
+    required_tools: tuple[str, ...],
+) -> tuple[dict[str, str], dict[str, str | None], dict[str, object]]:
+    status = _ensure_foundry_binaries(base_dir=base_dir, config=config, required_tools=required_tools)
+    prepared_env = dict(env)
+    prepend_dirs: list[str] = []
+    bin_dir = status.get("bin_dir")
+    if isinstance(bin_dir, Path) and bin_dir.exists():
+        prepend_dirs.append(str(bin_dir))
+    tool_paths: dict[str, str | None] = {}
+    for tool_name in required_tools:
+        resolved = status.get(f"{tool_name}_path")
+        tool_paths[tool_name] = str(resolved) if resolved is not None else None
+        if resolved:
+            parent = str(Path(str(resolved)).expanduser().resolve().parent)
+            if parent not in prepend_dirs:
+                prepend_dirs.append(parent)
+    if prepend_dirs:
+        existing = prepared_env.get("PATH", "")
+        prepared_env["PATH"] = os.pathsep.join(prepend_dirs + ([existing] if existing else []))
+    return prepared_env, tool_paths, status
+
+
+def _normalize_local_evm_rpc_url(rpc_url: str | None) -> str:
+    raw = str(rpc_url or "http://127.0.0.1:8545").strip() or "http://127.0.0.1:8545"
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlsplit(raw)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "127.0.0.1"
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    port = parsed.port or 8545
+    return urlunsplit((scheme, f"{host}:{port}", parsed.path or "", parsed.query, parsed.fragment))
+
+
+def _docker_visible_evm_rpc_url(rpc_url: str) -> str:
+    parsed = urlsplit(_normalize_local_evm_rpc_url(rpc_url))
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        host = "host.docker.internal"
+    port = parsed.port or 8545
+    return urlunsplit((parsed.scheme or "http", f"{host}:{port}", parsed.path or "", parsed.query, parsed.fragment))
+
+
+def _background_creationflags() -> int:
+    flags = 0
+    for name in ("CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
+        flags |= int(getattr(subprocess, name, 0) or 0)
+    return flags
+
+
+def _parse_commitment_anchor_deploy_output(output: str) -> tuple[str | None, str | None]:
+    addresses = re.findall(r"Deployed to:\s*(0x[a-fA-F0-9]{40})", output)
+    tx_hashes = re.findall(r"Transaction hash:\s*(0x[a-fA-F0-9]+)", output)
+    return (addresses[-1] if addresses else None, tx_hashes[-1] if tx_hashes else None)
+
+
+def _spawn_windows_local_devnet(*, env: dict[str, str], anvil_path: str | None = None) -> subprocess.Popen[str] | None:
+    parsed = urlsplit(_normalize_local_evm_rpc_url(env.get("CLAWCHAIN_EVM_RPC_URL")))
+    host = parsed.hostname or "127.0.0.1"
+    port = str(parsed.port or 8545)
+    chain_id = str(env.get("CLAWCHAIN_EVM_CHAIN_ID") or "31337")
+    popen_kwargs: dict[str, object] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "env": env,
+    }
+    creationflags = _background_creationflags()
+    if creationflags:
+        popen_kwargs["creationflags"] = creationflags
+    anvil_bin = anvil_path or shutil.which("anvil") or shutil.which("anvil.exe")
+    if anvil_bin is not None:
+        return subprocess.Popen(
+            [anvil_bin, "--host", host, "--port", port, "--chain-id", chain_id],
+            **popen_kwargs,
+        )
+    docker_bin = shutil.which("docker") or shutil.which("docker.exe")
+    if docker_bin is None:
+        return None
+    image = env.get("CLAWCHAIN_FOUNDRY_IMAGE", "ghcr.io/foundry-rs/foundry:latest")
+    return subprocess.Popen(
+        [
+            docker_bin,
+            "run",
+            "--rm",
+            "-p",
+            f"{port}:{port}",
+            image,
+            "anvil",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            port,
+            "--chain-id",
+            chain_id,
+        ],
+        **popen_kwargs,
+    )
+
+
+def _deploy_commitment_anchor_windows(
+    *,
+    root: Path,
+    env: dict[str, str],
+    manifest_path: Path,
+    forge_path: str | None = None,
+) -> Path | None:
+    rpc_url = _normalize_local_evm_rpc_url(env.get("CLAWCHAIN_EVM_RPC_URL"))
+    chain_id = int(str(env.get("CLAWCHAIN_EVM_CHAIN_ID") or "31337"))
+    private_key = str(env.get("CLAWCHAIN_DEPLOYER_PRIVATE_KEY") or _default_deployer_private_key())
+    combined_output = ""
+    returncode = 1
+    forge_bin = forge_path or shutil.which("forge") or shutil.which("forge.exe")
+    if forge_bin is not None:
+        completed = subprocess.run(
+            [
+                forge_bin,
+                "create",
+                "contracts/CommitmentAnchor.sol:CommitmentAnchor",
+                "--rpc-url",
+                rpc_url,
+                "--private-key",
+                private_key,
+                "--broadcast",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            check=False,
+        )
+        combined_output = (completed.stdout or "") + (f"\n{completed.stderr}" if completed.stderr else "")
+        returncode = completed.returncode
+    else:
+        docker_bin = shutil.which("docker") or shutil.which("docker.exe")
+        if docker_bin is None:
+            return None
+        image = env.get("CLAWCHAIN_FOUNDRY_IMAGE", "ghcr.io/foundry-rs/foundry:latest")
+        completed = subprocess.run(
+            [
+                docker_bin,
+                "run",
+                "--rm",
+                "-v",
+                f"{root}:/app",
+                "-w",
+                "/app",
+                "-e",
+                f"CLAWCHAIN_DEPLOYER_PRIVATE_KEY={private_key}",
+                "-e",
+                "FOUNDRY_DISABLE_NIGHTLY_WARNING=1",
+                "-e",
+                "HOME=/tmp",
+                "--entrypoint",
+                "/bin/sh",
+                image,
+                "-lc",
+                (
+                    "forge create contracts/CommitmentAnchor.sol:CommitmentAnchor "
+                    f"--rpc-url \"{_docker_visible_evm_rpc_url(rpc_url)}\" "
+                    "--private-key \"$CLAWCHAIN_DEPLOYER_PRIVATE_KEY\" --broadcast"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            check=False,
+        )
+        combined_output = (completed.stdout or "") + (f"\n{completed.stderr}" if completed.stderr else "")
+        returncode = completed.returncode
+    contract_address, tx_hash = _parse_commitment_anchor_deploy_output(combined_output)
+    if returncode != 0 or contract_address is None:
+        return None
+    deployed_at_block = None
+    try:
+        deployed_at_block = RpcEvmBroadcaster(rpc_url).probe_chain(
+            configured_chain_id=chain_id,
+            contract_address=contract_address,
+        ).latest_block
+    except Exception:  # noqa: BLE001
+        deployed_at_block = None
+    manifest = EvmDeploymentManifest(
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        contract_address=contract_address,
+        source_path=str(resolve_commitment_anchor_source_path()),
+        abi_path=str(resolve_commitment_anchor_abi_path()),
+        deployed_at_block=deployed_at_block,
+        deploy_tx_hash=tx_hash,
+        notes="Generated by clawchain.agent_proxy local bootstrap",
+    )
+    write_evm_deployment_manifest(manifest_path, manifest)
+    return manifest_path
+
+
+def _bootstrap_local_evm_manifest_windows(
+    *,
+    manifest_path: Path,
+    rpc_url: str | None = None,
+    chain_id: int | None = None,
+    deployer_private_key: str | None = None,
+    config: "AgentProxyConfig | None" = None,
+) -> tuple[Path | None, subprocess.Popen[str] | None]:
+    manifest_path = manifest_path.expanduser()
+    if manifest_path.exists():
+        try:
+            existing = load_evm_deployment_manifest(manifest_path)
+            if verify_evm_deployment_manifest(existing).ok:
+                return manifest_path, None
+        except Exception:  # noqa: BLE001
+            pass
+    env = os.environ.copy()
+    env["CLAWCHAIN_EVM_MANIFEST_PATH"] = str(manifest_path)
+    env["CLAWCHAIN_EVM_RPC_URL"] = _normalize_local_evm_rpc_url(rpc_url)
+    env["CLAWCHAIN_EVM_CHAIN_ID"] = str(chain_id if chain_id is not None else 31337)
+    env["CLAWCHAIN_DEPLOYER_PRIVATE_KEY"] = deployer_private_key or _default_deployer_private_key()
+    env, foundry_tools, _foundry_status = _prepare_foundry_env(
+        base_dir=manifest_path.parent,
+        config=config,
+        env=env,
+        required_tools=("anvil", "forge"),
+    )
+    process = _spawn_windows_local_devnet(env=env, anvil_path=foundry_tools.get("anvil"))
+    if process is None:
         return None, None
+    broadcaster = RpcEvmBroadcaster(env["CLAWCHAIN_EVM_RPC_URL"])
+    configured_chain_id = int(env["CLAWCHAIN_EVM_CHAIN_ID"])
+    try:
+        bootstrap_timeout_sec = float(os.environ.get("CLAWCHAIN_EVM_BOOTSTRAP_TIMEOUT_SEC", "45"))
+    except ValueError:
+        bootstrap_timeout_sec = 45.0
+    deadline = time.time() + max(bootstrap_timeout_sec, 8.0)
+    while time.time() < deadline:
+        if process.poll() is not None:
+            break
+        try:
+            broadcaster.probe_chain(configured_chain_id=configured_chain_id)
+            break
+        except Exception:  # noqa: BLE001
+            time.sleep(0.2)
+    else:
+        process.terminate()
+        return None, None
+    deployed_manifest = _deploy_commitment_anchor_windows(
+        root=_project_root(),
+        env=env,
+        manifest_path=manifest_path,
+        forge_path=foundry_tools.get("forge"),
+    )
+    if deployed_manifest is None or not manifest_path.exists():
+        process.terminate()
+        return None, None
+    return manifest_path, process
+
+
+def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subprocess.Popen[str] | None]:
     manifest_path = base_dir / "deployment.json"
     if manifest_path.exists():
         try:
@@ -75,6 +571,8 @@ def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subproce
                 return manifest_path, None
         except Exception:  # noqa: BLE001
             pass
+    if os.name == "nt":
+        return _bootstrap_local_evm_manifest_windows(manifest_path=manifest_path, config=None)
     root = _project_root()
     start_script = root / "scripts" / "start_local_devnet.sh"
     deploy_script = root / "scripts" / "deploy_commitment_anchor.sh"
@@ -83,8 +581,14 @@ def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subproce
     env = os.environ.copy()
     env.setdefault("CLAWCHAIN_EVM_MANIFEST_PATH", str(manifest_path))
     env.setdefault("CLAWCHAIN_DEPLOYER_PRIVATE_KEY", _default_deployer_private_key())
+    env, _foundry_tools, _foundry_status = _prepare_foundry_env(
+        base_dir=base_dir,
+        config=None,
+        env=env,
+        required_tools=("anvil", "forge"),
+    )
     process = subprocess.Popen(
-        [str(start_script)],
+        [shutil.which("bash") or "bash", str(start_script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -104,7 +608,7 @@ def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subproce
         process.terminate()
         return None, None
     deploy = subprocess.run(
-        [str(deploy_script)],
+        [shutil.which("bash") or "bash", str(deploy_script)],
         capture_output=True,
         text=True,
         env=env,
@@ -118,8 +622,6 @@ def _bootstrap_local_evm_manifest(base_dir: Path) -> tuple[Path | None, subproce
 
 
 def _bootstrap_local_evm_manifest_with_config(config: "AgentProxyConfig", base_dir: Path) -> tuple[Path | None, subprocess.Popen[str] | None]:
-    if os.name == "nt":
-        return None, None
     manifest_path = Path(config.evm_manifest_path).expanduser() if config.evm_manifest_path else (base_dir / "deployment.json")
     if manifest_path.exists():
         try:
@@ -128,6 +630,14 @@ def _bootstrap_local_evm_manifest_with_config(config: "AgentProxyConfig", base_d
                 return manifest_path, None
         except Exception:  # noqa: BLE001
             pass
+    if os.name == "nt":
+        return _bootstrap_local_evm_manifest_windows(
+            manifest_path=manifest_path,
+            rpc_url=config.evm_rpc_url,
+            chain_id=config.evm_chain_id,
+            deployer_private_key=config.evm_deployer_private_key,
+            config=config,
+        )
     root = _project_root()
     start_script = root / "scripts" / "start_local_devnet.sh"
     deploy_script = root / "scripts" / "deploy_commitment_anchor.sh"
@@ -140,8 +650,14 @@ def _bootstrap_local_evm_manifest_with_config(config: "AgentProxyConfig", base_d
     if config.evm_chain_id is not None:
         env["CLAWCHAIN_EVM_CHAIN_ID"] = str(config.evm_chain_id)
     env["CLAWCHAIN_DEPLOYER_PRIVATE_KEY"] = config.evm_deployer_private_key or _default_deployer_private_key()
+    env, _foundry_tools, _foundry_status = _prepare_foundry_env(
+        base_dir=base_dir,
+        config=config,
+        env=env,
+        required_tools=("anvil", "forge"),
+    )
     process = subprocess.Popen(
-        [str(start_script)],
+        [shutil.which("bash") or "bash", str(start_script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -162,7 +678,7 @@ def _bootstrap_local_evm_manifest_with_config(config: "AgentProxyConfig", base_d
         process.terminate()
         return None, None
     deploy = subprocess.run(
-        [str(deploy_script)],
+        [shutil.which("bash") or "bash", str(deploy_script)],
         capture_output=True,
         text=True,
         env=env,
@@ -611,6 +1127,9 @@ class AgentProxyConfig:
     auto_start_sidecar: bool = True
     anchor_strategy: str = "auto"
     auto_bootstrap_evm: bool = True
+    auto_install_foundry: bool = True
+    anvil_path: str | None = None
+    forge_path: str | None = None
     evm_manifest_path: str | None = None
     evm_rpc_url: str | None = None
     evm_chain_id: int | None = None
@@ -744,9 +1263,17 @@ class TransparentAgentProxy:
                         component="evm",
                         code="evm_manifest_missing",
                         message=(
-                            "Automatic local EVM bootstrap did not produce a deployment manifest. "
-                            "You may need to install/start the local devnet toolchain or provide "
-                            "CLAWCHAIN_EVM_MANIFEST_PATH."
+                            (
+                                "Automatic local EVM bootstrap on Windows did not produce a deployment manifest. "
+                                "Install local anvil/forge tooling or Docker Desktop, or provide "
+                                "CLAWCHAIN_EVM_MANIFEST_PATH / external RPC settings manually."
+                            )
+                            if os.name == "nt"
+                            else (
+                                "Automatic local EVM bootstrap did not produce a deployment manifest. "
+                                "You may need to install/start the local devnet toolchain or provide "
+                                "CLAWCHAIN_EVM_MANIFEST_PATH."
+                            )
                         ),
                     )
                 )

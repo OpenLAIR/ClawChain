@@ -1,130 +1,103 @@
 <div align="center">
   <img src="assets/logo/clawchain-logo.svg" alt="ClawChain logo" width="128" height="128">
   <h1>ClawChain</h1>
-  <p><strong>Secure, recoverable, and fully traceable runtime for high-privilege AI coding agents.</strong></p>
+  <p><strong>Secure, recoverable, and verifiable runtime control for high-privilege AI coding agents.</strong></p>
   <p>
-    ClawChain protects agent runtimes against opaque execution, lost evidence, incomplete recovery,
-    and weak post-incident traceability.
+    ClawChain turns opaque terminal agent sessions into monitored, restorable, and EVM-verifiable execution flows.
+  </p>
+  <p>
+    <a href="README.zh-CN.md">中文说明</a> · <a href="DEVELOPER.md">Developer Guide</a>
   </p>
 </div>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Runtime-Agent%20Safety-111827?style=for-the-badge" alt="Runtime Agent Safety" />
-  <img src="https://img.shields.io/badge/Recovery-Delete--First-0F766E?style=for-the-badge" alt="Delete-first recovery" />
+  <img src="https://img.shields.io/badge/Recovery-Snapshot%20Backed-0F766E?style=for-the-badge" alt="Snapshot-backed recovery" />
   <img src="https://img.shields.io/badge/Chain-EVM%20Verifiable-7C3AED?style=for-the-badge" alt="EVM verifiable" />
 </p>
 
+## Dashboard
+
+<p align="center">
+  <img src="assets/screenshots/dashboard.png" alt="ClawChain dashboard" width="1200">
+</p>
+
+The dashboard is the main operator surface for session discovery, `Join Monitor`, dangerous-operation review, restore, proof export, and chain status inspection.
+
 ## Overview
 
-Modern terminal agents such as Codex, Claude Code, Gemini CLI, Cursor, and future high-permission agent systems can modify a host machine quickly, broadly, and sometimes opaquely. Once a destructive command lands, teams usually face four immediate problems:
+ClawChain is a runtime safety layer for AI coding agents that can execute real commands on a real machine.
 
-- execution was not transparently captured
-- evidence is incomplete or easy to lose
-- recovery is partial or unreliable
-- post-incident traceability is weak
+Its current product goal is straightforward:
 
-**ClawChain** is a runtime layer that addresses those problems with one unified workflow:
+- discover a live agent session
+- bring it into a monitored control path
+- detect destructive delete-style operations
+- preserve recovery material before loss becomes permanent
+- restore affected files or directories
+- export a readable proof log
+- anchor and verify proof fields on an EVM backend
 
-- discover live agent sessions
-- route a session into a controlled execution path
-- detect dangerous operations
-- preserve recovery material for destructive delete actions
-- export per-session proof logs
-- anchor key proof fields to a blockchain backend and verify them later
-
-## What ClawChain Solves
-
-ClawChain is not just a session dashboard. It is meant to be the safety control plane for high-privilege AI agent execution.
-
-### Core Guarantees
-
-- **Safer execution**
-  - sessions are onboarded into a controlled launcher path rather than left fully opaque
-- **Recoverability**
-  - destructive delete actions can generate recovery material and be restored
-- **Per-session evidence**
-  - proof export is scoped to one monitored session, not mixed across the whole project
-- **Traceability**
-  - critical proof fields can be checked against the configured EVM chain backend
-
-### Core Threat Model
-
-ClawChain is designed for the practical risks introduced by high-permission coding agents:
-
-- `rm -rf` style deletion
-- destructive shell actions hidden inside long interactive sessions
-- incomplete logs after a failure or interruption
-- difficulty proving what happened after the fact
+This repository is not a generic blockchain demo. The chain is used to strengthen proof integrity for risky agent actions. The product itself is the control plane around monitoring, recovery, evidence, and verification.
 
 ## Current Scope
 
-The current stable system is intentionally narrow and reliable.
+### Stable today
 
-### Stable Today
+- Codex is the primary end-to-end supported agent path.
+- Linux and Windows both support the main monitored workflow.
+- One-click setup scripts exist for Linux/macOS and Windows.
+- Snapshot-backed delete recovery, readable proof export, and EVM verification work together.
 
-- **Codex** is the primary supported end-to-end path
-- `Join Monitor` is the main onboarding flow; `Copy Resume Command` is optional when you later want to reopen the same monitored session
-- delete detection, snapshot-backed recovery, proof export, and chain verification are working together
+### Intentionally narrow
 
-### In Progress
+- Recovery is currently focused on destructive delete-style operations.
+- Other risk classes may be recorded for audit without claiming broad rollback support.
+- Multi-agent coverage exists in the codebase, but not all integrations should be treated as equally mature.
 
-The broader multi-agent surface is being expanded, but not all of it should be treated as equally mature yet.
+## Key Capabilities
 
-- Claude Code: integration in progress
-- Gemini CLI: integration in progress
-- Cursor: integration in progress
-- OpenClaw and future agent runtimes: planned extension path
-
-## Risk Model
-
-ClawChain currently uses a deliberately simple two-class model:
-
-- **restorable risks**
-  - currently only `Delete / Remove`
-- **audit-only risks**
-  - recorded and exported for evidence, but not part of the restore path
-
-This is by design. The project prioritizes making the delete workflow dependable rather than claiming broad but fragile recovery support for every risk type.
-
-## Architecture
-
-ClawChain is organized around four layers:
-
-1. **Session Monitoring**
-   - discovers live agent sessions and identifies the active session path
-2. **Controlled Execution**
-   - routes the session into a managed launcher / controlled resume flow
-3. **Recovery & Proof**
-   - captures snapshots, impact-sets, receipts, submissions, and per-session proof material
-4. **Chain Verification**
-   - anchors key commitment fields and verifies them later against the configured EVM backend
+- Monitored session onboarding with controlled resume and handoff commands
+- Snapshot-backed delete recovery through a recovery vault
+- Readable proof export per monitored session
+- Encrypted local proof archive for downloaded proof logs
+- Local EVM bootstrap for chain anchoring and verification
+- Cross-platform service and daemon flow for Linux and Windows
+- UI for sessions, activity, restore, proof export, and chain status
 
 ## Repository Layout
 
 - `clawchain/`
-  - main runtime, UI, monitoring, recovery, proof, and chain logic
+  Main runtime, monitoring, recovery, proof, UI, and chain integration logic.
 - `contracts/`
-  - EVM commitment anchor contract and ABI
+  `CommitmentAnchor.sol` and ABI used by local EVM anchoring.
 - `scripts/`
-  - local devnet and contract deployment helpers
+  Smoke scripts and validation helpers.
 - `demo/delete-smoke/`
-  - tiny smoke assets for delete / restore validation
-- `requirements.txt`
-  - minimal Python dependencies for runtime and local validation
+  Tiny assets for delete and restore validation.
+- `setup_clawchain.cmd`
+  One-click Windows setup entrypoint.
+- `setup_clawchain.sh`
+  One-click Linux/macOS setup entrypoint.
+- `DEVELOPER.md`
+  Detailed developer workflow, architecture, and testing guide.
 
-This export intentionally excludes benchmark assets, internal tests, historical run artifacts, caches, and research-only modules.
+## Requirements
 
-## Quick Start
+- Python 3.12
+- `pip`
+- Git
+- For local chain bootstrap:
+  - preferred: Foundry (`anvil`, `forge`)
+  - optional fallback: Docker where available
 
-### 1. Create an Environment
+## Installation
 
 ```bash
 conda create -y -n ClawChain python=3.12 pip
 conda activate ClawChain
 ```
-
-### 2. Install
 
 ```bash
 cd <repo-root>
@@ -132,229 +105,240 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### 3. Start the UI
+## Quick Start
 
-#### Same-machine local testing
+### Windows
 
-Use loopback binding when the browser is on the same host:
-
-```bash
-python -m clawchain.agent_proxy_cli ui --host 127.0.0.1 --port 8888
+```bat
+setup_clawchain.cmd 8888
 ```
 
-Open:
+### Linux / macOS
+
+```bash
+bash setup_clawchain.sh 8888
+```
+
+The setup scripts do the following:
+
+1. stop an old local ClawChain service for the selected account if it exists
+2. create or refresh the account configuration
+3. try local EVM bootstrap
+4. start the ClawChain background service
+5. verify service status
+6. launch the UI
+
+By default, setup is best-effort for chain bootstrap. If you want setup to fail unless local EVM bootstrap succeeds:
+
+### Windows strict mode
+
+```bat
+set CLAWCHAIN_REQUIRE_CHAIN=1
+setup_clawchain.cmd 8888
+```
+
+### Linux / macOS strict mode
+
+```bash
+CLAWCHAIN_REQUIRE_CHAIN=1 bash setup_clawchain.sh 8888
+```
+
+## Open the UI
+
+### Same machine
 
 ```text
 http://127.0.0.1:8888
 ```
 
-#### Remote access from another machine
+### Remote Linux host
 
-Bind on all interfaces only when you intentionally want remote access:
+If you run Linux setup from an SSH session, `run_clawchain_ui.sh` automatically switches to a remote-friendly binding and prints the remote browser URL.
 
-```bash
-python -m clawchain.agent_proxy_cli ui --host 0.0.0.0 --port 8888
-```
+## First Monitored Workflow
 
-Then open the actual host IP from the browser:
+1. Start or locate a live Codex session.
+2. Open the ClawChain UI.
+3. Click `Join Monitor`.
+4. Perform a delete-style destructive action.
+5. Confirm the operation appears in history.
+6. Use `Restore`.
+7. Export the proof log.
+8. Confirm the exported proof shows EVM fields when local chain bootstrap is enabled.
 
-```text
-http://<host-ip>:8888
-```
+For a freshly anchored proof, the exported proof should typically include:
 
-Important:
+- `anchor_backend: "evm:31337"`
+- `anchor_mode: "evm-anchored"`
+- `anchor_status: "confirmed"`
+- `anchor_lookup_found: true`
+- `anchor_field_checks.session_id = true`
+- `anchor_field_checks.batch_seq_no = true`
+- `anchor_field_checks.merkle_root = true`
 
-- `0.0.0.0` is a bind address, not a browser URL
-- if `8888` is already in use, switch to another port such as `8889`
-- on the same machine, prefer `127.0.0.1`
+## Useful Commands
 
-### Platform Notes
-
-#### Linux / macOS
-
-You can use either direct Python startup or the helper shell script:
-
-```bash
-bash run_clawchain_ui.sh 8888
-```
-
-The helper script is included in the repository root and is intended for Unix-like systems. It defaults to `HOST=127.0.0.1` and can be overridden, for example: `HOST=0.0.0.0 bash run_clawchain_ui.sh 8888`.
-
-On macOS, the monitored Codex launcher and handoff artifacts remain shell scripts and the UI will emit `bash ...` resume / handoff commands.
-
-#### Windows
-
-You can use either the batch helper or direct Python startup:
-
-```bat
-run_clawchain_ui.cmd 8888
-```
-
-or:
+### UI only
 
 ```bash
 python -m clawchain.agent_proxy_cli ui --host 127.0.0.1 --port 8888
 ```
 
-On Windows, the monitored Codex launcher and handoff artifacts are generated as `.cmd` files and the UI will emit `cmd /k ...` or `cmd /c ...` commands instead of `bash ...`.
+### Windows UI launcher
 
-ClawChain does not require `pgrep` on Windows. The host monitor now falls back to a PowerShell process scan that prefers CIM when available and degrades to `Get-Process` when CIM command-line access is blocked.
-
-For monitored Codex sessions, ClawChain now runs a background rollout watcher from the local `service-start` process. On both Windows and macOS/Linux, it watches Codex `rollout-*.jsonl` tool calls in real time and, for risky `shell_command` / delete-style `apply_patch` actions, it plans recovery before the tool output is recorded so the session can produce recovery catalogs, receipts, submissions, and proof cards instead of UI-only fallback history.
-
-ClawChain does not require any external snapshot utility such as `snap`, VSS tooling, or filesystem plugins. The `snapshot` recovery source is implemented inside ClawChain by copying the target into the session's local `recovery-vault`.
-
-For fresh deployments from GitHub:
-
-- the standard monitored restore flow is `snapshot`-backed and does not require any Git bootstrap
-- `Join Monitor` starts the background service and uses ClawChain's own `recovery-vault` snapshots for restore
-- no external snapshot utility or Git recovery setup is required for the normal `Join Monitor -> delete -> Restore` path
-
-## End-to-End Workflow
-
-### Step 1. Start a Codex session
-
-Launch a fresh Codex session as usual.
-
-### Step 2. Onboard it into ClawChain
-
-In the UI:
-
-1. find the new session card
-2. open `Session Detail`
-3. click `Join Monitor`
-4. optionally click `Copy Resume Command` if you want a reusable monitored resume command for later
-
-`Join Monitor` now starts the per-session ClawChain background service by default and keeps the current Codex terminal in place. It does not open extra terminals automatically. If that service is missing, the monitored session can still appear in the UI, but it will fall back to history-only records instead of producing recoverable proof artifacts.
-
-If `Restore` is greyed out after a fresh deployment, the usual causes are:
-
-- the dangerous operation happened before `Join Monitor` finished starting the background service
-- the session is still attached to an older service process and needs a restart after updating ClawChain
-- the operation only produced a UI fallback record, which means no snapshot or recovery catalog was created at execution time
-
-### Step 3. Continue in the same session
-
-Keep using the same Codex session after `Join Monitor` completes. New dangerous operations are captured in place by the background rollout watcher.
-
-If you later close that terminal and want to reopen the same monitored session, use `Copy Resume Command`.
-
-Platform-specific note:
-
-- Linux / macOS: the copied resume command will be a `bash .../codex-with-clawchain ...` command
-- Windows: the copied resume command will be a `cmd /k ...\\codex-with-clawchain.cmd ...` command
-
-### Step 4. Perform a delete action
-
-Run a delete action from inside the already-joined session.
-
-Important: perform the delete only after `Join Monitor` has completed. That is what allows the background watcher to capture the dangerous tool call and build a recoverable proof package.
-
-### Step 5. Validate the result
-
-Return to the UI and confirm:
-
-- the new delete appears in `Dangerous Operations`
-- the record is not `No Snapshot`
-- `Restore` is available
-- `Download Proof Log` includes non-empty `proof_cards` and the session evidence paths point into `runtime/local` and `recovery-vault`
-
-### Step 6. Restore the deletion
-
-Click `Restore` and verify the deleted target is back on disk.
-
-### Step 7. Export proof
-
-Use `Download Proof Log` in `Session Detail` to export a per-session proof JSON.
-
-### Step 8. Verify on chain
-
-```bash
-conda run -n ClawChain python -m clawchain.agent_proxy_cli chain-verify <account-id> --session <SESSION_ID>
+```bat
+run_clawchain_ui.cmd 8888
 ```
 
-## Delete / Restore Smoke Test
-
-Prepare a tiny target:
+### Linux/macOS UI launcher
 
 ```bash
-mkdir -p demo/delete-smoke/tmp-delete
-echo hello > demo/delete-smoke/tmp-delete/a.txt
-echo world > demo/delete-smoke/tmp-delete/b.txt
+bash run_clawchain_ui.sh 8888
 ```
 
-Then, from the monitored Codex session, delete:
+### Manual chain bootstrap
+
+```bash
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
+```
+
+### Chain status
+
+```bash
+python -m clawchain.agent_proxy_cli chain-status local-operator
+```
+
+### Smoke validation
+
+#### Linux / macOS
+
+```bash
+bash scripts/run_linux_smoke.sh
+bash scripts/run_linux_smoke.sh --bootstrap-local-evm
+```
+
+#### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1 --bootstrap-local-evm
+```
+
+## Windows Foundry Manual Fallback
+
+ClawChain prefers local Foundry on Windows. If automatic Foundry download fails, the usual cause is that the machine cannot reach GitHub Releases or the release asset download is blocked by local network policy.
+
+The managed Foundry location for the default account is:
 
 ```text
-demo/delete-smoke/tmp-delete
+%USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin
 ```
 
-After deletion:
+ClawChain only needs two binaries there:
 
-1. verify the record appears in `Dangerous Operations`
-2. click `Restore`
-3. confirm the folder is back on disk
+- `anvil.exe`
+- `forge.exe`
 
-Disk verification:
+### Option A: Download the latest official Windows asset with PowerShell
 
-```bash
-ls -R demo/delete-smoke/tmp-delete
+Run the following in PowerShell:
+
+```powershell
+$toolRoot = Join-Path $env:USERPROFILE ".clawchain-agent\local-operator\_internal\chain\toolchains\foundry"
+$binDir = Join-Path $toolRoot "bin"
+$zipPath = Join-Path $env:TEMP "clawchain-foundry.zip"
+$unpackDir = Join-Path $env:TEMP "clawchain-foundry-unpack"
+
+New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+Remove-Item $unpackDir -Recurse -Force -ErrorAction SilentlyContinue
+
+$release = Invoke-RestMethod -Headers @{ "User-Agent" = "clawchain-manual-foundry" } `
+  -Uri "https://api.github.com/repos/foundry-rs/foundry/releases/latest"
+$asset = $release.assets |
+  Where-Object { $_.name -match 'win32_amd64\.zip$' } |
+  Select-Object -First 1
+if (-not $asset) { throw "No Windows Foundry asset found in the latest release." }
+
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+Expand-Archive -Path $zipPath -DestinationPath $unpackDir -Force
+Copy-Item (Get-ChildItem $unpackDir -Recurse -Filter anvil.exe | Select-Object -First 1).FullName $binDir -Force
+Copy-Item (Get-ChildItem $unpackDir -Recurse -Filter forge.exe | Select-Object -First 1).FullName $binDir -Force
 ```
 
-## Proof Export
+Then rerun:
 
-`Download Proof Log` exports a **session-scoped** JSON file containing:
-
-- session metadata
-- dangerous operations for that session
-- live activity for that session
-- proof cards for that session
-- a concise security model summary
-
-ClawChain also keeps an encrypted local proof archive for integrity and retention.
-
-## Chain Verification
-
-Account-level chain overview:
-
-```bash
-conda run -n ClawChain python -m clawchain.agent_proxy_cli chain-status <account-id>
+```bat
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
 ```
 
-Session-level chain verification:
+### Option B: Download on another machine and copy the binaries manually
 
-```bash
-conda run -n ClawChain python -m clawchain.agent_proxy_cli chain-verify <account-id> --session <SESSION_ID>
+If the Windows host cannot reach GitHub at all:
+
+1. Download the latest Windows Foundry release asset from:
+   `https://github.com/foundry-rs/foundry/releases/latest`
+2. Pick the asset that ends with `win32_amd64.zip`.
+3. Extract it.
+4. Copy `anvil.exe` and `forge.exe` into:
+   `%USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin`
+5. Rerun:
+
+```bat
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
 ```
 
-Important:
+### Option C: Keep Foundry elsewhere and point ClawChain at it
 
-- `chain-status` is an account-level overview
-- `chain-verify --session ...` is the session-specific validation command
+If you already have Foundry installed in another location, you can point ClawChain at explicit paths:
 
-## Current Boundaries
+```bat
+set CLAWCHAIN_ANVIL_PATH=C:\tools\foundry\anvil.exe
+set CLAWCHAIN_FORGE_PATH=C:\tools\foundry\forge.exe
+setup_clawchain.cmd 8888
+```
 
-ClawChain currently does **not** claim:
+You can also do the same with `deploy`:
 
-- restore coverage for every dangerous operation type
-- polished full support for every non-Codex agent path
-- stronger-than-host-account OS isolation for local encrypted artifacts
-- full benchmark publication in this export
+```bat
+python -m clawchain.agent_proxy_cli deploy local-operator local-operator ^
+  --workspace E:\path\to\workspace ^
+  --anvil-path C:\tools\foundry\anvil.exe ^
+  --forge-path C:\tools\foundry\forge.exe ^
+  --no-start-service
+```
 
-The current emphasis is practical stability for monitored delete detection, restoration, proof export, and chain verification.
+Official Foundry sources:
 
-## Acceptance Checklist
+- https://github.com/foundry-rs/foundry/releases/latest
+- https://api.github.com/repos/foundry-rs/foundry/releases/latest
+- https://getfoundry.sh/reference/forge/forge.html
 
-A clean installation is considered healthy if all of these succeed:
+## Troubleshooting
 
-1. create and activate the `ClawChain` conda environment
-2. `pip install -r requirements.txt && pip install -e .`
-3. start the UI on port `8888`
-4. onboard a Codex session with `Join Monitor`
-5. keep working in the same joined session, or optionally use the copied resume command later
-6. perform one delete
-7. see a restorable delete record in `Dangerous Operations`
-8. restore the deleted target
-9. run `chain-verify --session <SESSION_ID>` successfully
+### The UI looks stale or still shows an old process
 
-If these nine steps pass, the exported repository is functioning correctly.
+Re-run the same UI command on the same port. The launcher is designed to replace an older listener on that port.
+
+### Windows setup says chain bootstrap failed
+
+Run the manual diagnostic first:
+
+```bat
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
+```
+
+Read these fields in the JSON output:
+
+- `bootstrap_diagnostics.anvil_path`
+- `bootstrap_diagnostics.forge_path`
+- `bootstrap_diagnostics.managed_foundry_bin_contents`
+- `bootstrap_diagnostics.managed_foundry_install_error`
+
+### Proof export still shows `local-json`
+
+That usually means you exported a proof from an older monitored session created before chain bootstrap completed. Start a new monitored session and export a fresh proof.
+
+## Developer Documentation
+
+For architecture notes, setup internals, testing, acceptance criteria, and debugging guidance, see [DEVELOPER.md](DEVELOPER.md).

@@ -19,6 +19,9 @@ class AgentProxyStoredConfig:
     auto_start_sidecar: bool = True
     anchor_strategy: str = "auto"
     auto_bootstrap_evm: bool = True
+    auto_install_foundry: bool = True
+    anvil_path: str | None = None
+    forge_path: str | None = None
     evm_manifest_path: str | None = None
     evm_rpc_url: str | None = None
     evm_chain_id: int | None = None
@@ -51,6 +54,9 @@ class AgentProxyStoredConfig:
             auto_start_sidecar=self.auto_start_sidecar,
             anchor_strategy=self.anchor_strategy,
             auto_bootstrap_evm=self.auto_bootstrap_evm,
+            auto_install_foundry=self.auto_install_foundry,
+            anvil_path=self.anvil_path,
+            forge_path=self.forge_path,
             evm_manifest_path=self.evm_manifest_path,
             evm_rpc_url=self.evm_rpc_url,
             evm_chain_id=self.evm_chain_id,
@@ -99,6 +105,9 @@ class AgentProxyStoredConfig:
             auto_start_sidecar=bool(data.get("auto_start_sidecar", True)),
             anchor_strategy=str(data.get("anchor_strategy", "auto")),
             auto_bootstrap_evm=bool(data.get("auto_bootstrap_evm", True)),
+            auto_install_foundry=bool(data.get("auto_install_foundry", True)),
+            anvil_path=str(data["anvil_path"]) if data.get("anvil_path") is not None else None,
+            forge_path=str(data["forge_path"]) if data.get("forge_path") is not None else None,
             evm_manifest_path=str(data["evm_manifest_path"]) if data.get("evm_manifest_path") is not None else None,
             evm_rpc_url=str(data["evm_rpc_url"]) if data.get("evm_rpc_url") is not None else None,
             evm_chain_id=int(data["evm_chain_id"]) if data.get("evm_chain_id") is not None else None,

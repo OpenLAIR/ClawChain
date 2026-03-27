@@ -11,6 +11,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -20,6 +21,8 @@ from .agent_proxy import (
     TransparentAgentProxy,
     _bootstrap_local_evm_manifest,
     _bootstrap_local_evm_manifest_with_config,
+    _default_foundry_bin_dir,
+    _default_foundry_install_root,
 )
 from .agent_proxy_config import AgentProxyStoredConfig, load_agent_proxy_config, write_agent_proxy_config
 from .agent_proxy_daemon import AgentProxyDaemon, AgentProxyDaemonClient
@@ -58,6 +61,79 @@ def _registry_root() -> Path:
 def _default_registry_path(account_id: str, *, root_dir: Path | None = None) -> Path:
     base = root_dir.expanduser() if root_dir is not None else _registry_root()
     return base / account_id / "session-registry.json"
+
+
+def _default_proof_manifest_path(account_id: str) -> Path:
+    return Path(tempfile.gettempdir()) / f"clawchain-proof-{account_id}.json"
+
+
+def _load_json_file_if_exists(path: Path) -> dict[str, object] | None:
+    try:
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return dict(payload) if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _local_evm_bootstrap_diagnostics(
+    *,
+    base_dir: Path | None = None,
+    stored: AgentProxyStoredConfig | None = None,
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        "anvil_path": shutil.which("anvil") or shutil.which("anvil.exe"),
+        "forge_path": shutil.which("forge") or shutil.which("forge.exe"),
+        "docker_path": shutil.which("docker") or shutil.which("docker.exe"),
+    }
+    if stored is not None:
+        diagnostics["auto_install_foundry"] = bool(stored.auto_install_foundry)
+        diagnostics["configured_anvil_path"] = stored.anvil_path
+        diagnostics["configured_forge_path"] = stored.forge_path
+    if base_dir is not None:
+        bin_dir = _default_foundry_bin_dir(base_dir)
+        install_root = _default_foundry_install_root(base_dir)
+        diagnostics["managed_foundry_bin_dir"] = str(bin_dir)
+        diagnostics["managed_foundry_bin_exists"] = bin_dir.exists()
+        diagnostics["managed_foundry_bin_contents"] = (
+            sorted(path.name for path in bin_dir.iterdir() if path.is_file())
+            if bin_dir.exists()
+            else []
+        )
+        install_error = _load_json_file_if_exists(install_root / "install-error.json")
+        if install_error is not None:
+            diagnostics["managed_foundry_install_error"] = install_error
+        install_metadata = _load_json_file_if_exists(install_root / "install.json")
+        if install_metadata is not None:
+            diagnostics["managed_foundry_install_metadata"] = install_metadata
+    return diagnostics
+
+
+def _terminate_pid(pid: int, *, force: bool = False) -> None:
+    if pid <= 0:
+        return
+    if is_windows():
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        taskkill = shutil.which("taskkill") or str(system_root / "System32" / "taskkill.exe")
+        args = [taskkill, "/PID", str(pid), "/T"]
+        if force:
+            args.append("/F")
+        try:
+            subprocess.run(args, check=False, capture_output=True, text=True)
+            return
+        except OSError:
+            pass
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        return
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
+    try:
+        os.kill(pid, kill_signal)
+    except OSError:
+        pass
 
 
 def _load_session_registry(account_id: str, *, root_dir: Path | None = None) -> list[SessionRegistryEntry]:
@@ -824,7 +900,13 @@ def _build_proof_card(entry: dict[str, object]) -> dict[str, object]:
     submissions = _related(_load_json_rows_for_proof(chain_paths.submission_store_path))
     latest_receipt = receipts[-1] if receipts else {}
     latest_submission = submissions[-1] if submissions else {}
-    metadata = dict(latest_receipt.get("metadata") or {})
+    metadata = dict(latest_receipt.get("metadata") or latest_submission.get("metadata") or {})
+    anchor_fields = _resolve_anchor_fields(
+        config_file=config_file,
+        session_id=entry.get("session_id"),
+        latest_receipt=latest_receipt,
+        latest_submission=latest_submission,
+    )
     return {
         "session_id": entry.get("session_id"),
         "session_name": entry.get("session_name"),
@@ -840,12 +922,7 @@ def _build_proof_card(entry: dict[str, object]) -> dict[str, object]:
         "snapshot_paths": snapshot_paths,
         "receipt": str(chain_paths.receipt_store_path),
         "submission": str(chain_paths.submission_store_path),
-        "anchor_reference": latest_receipt.get("anchor_reference") or latest_submission.get("anchor_reference"),
-        "anchor_backend": latest_receipt.get("anchor_backend") or latest_submission.get("anchor_backend"),
-        "anchor_mode": latest_receipt.get("anchor_mode") or latest_submission.get("anchor_mode"),
-        "batch_seq_no": latest_receipt.get("batch_seq_no") or latest_submission.get("batch_seq_no"),
-        "merkle_root": latest_receipt.get("merkle_root") or latest_submission.get("merkle_root"),
-        "commitment_type": latest_receipt.get("commitment_type") or latest_submission.get("commitment_type"),
+        **anchor_fields,
         "config_path": str(config_file),
         "encrypted_bundle_ref": metadata.get("encrypted_bundle_ref"),
         "recovery_catalog": str(chain_paths.recovery_catalog_path),
@@ -948,6 +1025,73 @@ def _deployment_report_payload(report: EvmDeploymentVerificationReport) -> dict[
             else None
         ),
     }
+
+
+def _resolve_anchor_fields(
+    *,
+    config_file: Path,
+    session_id: object,
+    latest_receipt: dict[str, object],
+    latest_submission: dict[str, object],
+) -> dict[str, object]:
+    receipt = latest_receipt or {}
+    submission = latest_submission or {}
+    result = {
+        'anchor_reference': receipt.get('anchor_reference') or submission.get('anchor_reference'),
+        'anchor_backend': receipt.get('anchor_backend') or submission.get('anchor_backend'),
+        'anchor_mode': receipt.get('anchor_mode') or submission.get('anchor_mode'),
+        'batch_seq_no': receipt.get('batch_seq_no') if receipt.get('batch_seq_no') is not None else submission.get('batch_seq_no'),
+        'merkle_root': receipt.get('merkle_root') or submission.get('merkle_root'),
+        'commitment_type': receipt.get('commitment_type') or submission.get('commitment_type'),
+    }
+    backend = str(result.get('anchor_backend') or '')
+    if backend.startswith('evm:'):
+        result['anchor_status'] = 'pending'
+    batch_seq_no = result.get('batch_seq_no')
+    merkle_root = str(result.get('merkle_root') or '')
+    if not backend.startswith('evm:') or batch_seq_no is None or not merkle_root:
+        return result
+    try:
+        stored = load_agent_proxy_config(config_file)
+        manifest_path = _resolve_manifest_path_for_stored_config(stored)
+        if manifest_path is None or not manifest_path.exists():
+            return result
+        manifest = load_evm_deployment_manifest(manifest_path)
+        report = verify_evm_deployment_manifest(manifest)
+        result['chain_manifest_path'] = str(manifest_path)
+        result['chain_deployment_ok'] = bool(report.ok)
+        if not report.ok:
+            return result
+        broadcaster = RpcEvmBroadcaster(manifest.rpc_url)
+        lookup = broadcaster.lookup_commitment(
+            contract_address=manifest.contract_address,
+            session_id=str(session_id or ''),
+            batch_seq_no=int(batch_seq_no or 0),
+            merkle_root=merkle_root,
+        )
+        card_root = merkle_root.lower()
+        lookup_root = str(lookup.merkle_root or '').lower()
+        if card_root.startswith('0x'):
+            card_root = card_root[2:]
+        if lookup_root.startswith('0x'):
+            lookup_root = lookup_root[2:]
+        field_checks = {
+            'session_id': lookup.session_id == str(session_id or ''),
+            'batch_seq_no': lookup.batch_seq_no == int(batch_seq_no or 0),
+            'merkle_root': lookup_root == card_root,
+        }
+        result['anchor_lookup_found'] = bool(lookup.found)
+        result['anchored_at_block'] = lookup.anchored_at_block
+        result['anchor_submitter'] = lookup.submitter
+        result['anchor_field_checks'] = field_checks
+        if lookup.found and all(field_checks.values()):
+            result['anchor_mode'] = 'evm-anchored'
+            result['anchor_status'] = 'confirmed'
+        elif lookup.found:
+            result['anchor_status'] = 'mismatch'
+    except Exception:
+        return result
+    return result
 
 
 def _chain_summary_from_card(card: dict[str, object]) -> dict[str, object]:
@@ -1111,7 +1255,27 @@ def _chain_connect_account(
         base_dir = Path(primary_stored.base_dir).expanduser() if primary_stored.base_dir else _default_account_root(account_id, root_dir=root_dir)
         resolved_manifest_path, evm_process = _bootstrap_local_evm_manifest_with_config(proxy_config, base_dir)
         if resolved_manifest_path is None:
-            return {'ok': False, 'error': 'evm_bootstrap_failed', 'account_id': account_id}
+            managed_base_dir = Path(str(proxy_config.evm_manifest_path or '')).expanduser().parent
+            diagnostics = _local_evm_bootstrap_diagnostics(base_dir=managed_base_dir, stored=primary_stored)
+            if diagnostics.get('managed_foundry_install_error'):
+                hint = (
+                    "Foundry auto-install failed before bootstrap. Check "
+                    "managed_foundry_install_error; Docker is only an optional fallback when present."
+                )
+            else:
+                hint = (
+                    "Local anvil/forge are still unavailable after bootstrap prep. Install Foundry, "
+                    "set --anvil-path/--forge-path, or provide CLAWCHAIN_EVM_MANIFEST_PATH / explicit RPC settings. "
+                    "Docker is only an optional fallback when present."
+                )
+            return {
+                'ok': False,
+                'error': 'evm_bootstrap_failed',
+                'account_id': account_id,
+                'manifest_target': str(proxy_config.evm_manifest_path or ''),
+                'bootstrap_diagnostics': diagnostics,
+                'hint': hint,
+            }
     elif resolved_manifest_path is None and rpc_url and chain_id is not None and contract_address:
         resolved_manifest_path = _build_evm_manifest(
             manifest_path=_default_chain_manifest_path(account_id, root_dir=root_dir),
@@ -1141,6 +1305,9 @@ def _chain_connect_account(
             auto_start_sidecar=stored.auto_start_sidecar,
             anchor_strategy=stored.anchor_strategy,
             auto_bootstrap_evm=False,
+            auto_install_foundry=stored.auto_install_foundry,
+            anvil_path=stored.anvil_path,
+            forge_path=stored.forge_path,
             evm_manifest_path=str(resolved_manifest_path),
             evm_rpc_url=manifest.rpc_url,
             evm_chain_id=manifest.chain_id,
@@ -2099,20 +2266,14 @@ def _relaunch_codex_session(*, item: dict[str, object], prepared_item: dict[str,
     forwarded = tokens[1:]
     remaining_pids = [int(pid) for pid in item.get("pids", []) if pid is not None]
     for pid in remaining_pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        _terminate_pid(pid, force=False)
     deadline = time.time() + 2.0
     while remaining_pids and time.time() < deadline:
         remaining_pids = [pid for pid in remaining_pids if is_pid_alive(pid)]
         if remaining_pids:
             time.sleep(0.05)
     for pid in list(remaining_pids):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _terminate_pid(pid, force=True)
     deadline = time.time() + 1.0
     while remaining_pids and time.time() < deadline:
         remaining_pids = [pid for pid in remaining_pids if is_pid_alive(pid)]
@@ -2483,6 +2644,19 @@ def _render_supervise_dashboard(
 
 
 def _stdin_ready(timeout_sec: float) -> bool:
+    if is_windows():
+        if sys.stdin is None or not getattr(sys.stdin, "isatty", lambda: False)():
+            return False
+        try:
+            import msvcrt
+        except ImportError:
+            return False
+        deadline = time.monotonic() + max(timeout_sec, 0.0)
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                return True
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return msvcrt.kbhit()
     try:
         ready, _, _ = select.select([sys.stdin], [], [], timeout_sec)
     except (OSError, ValueError):
@@ -2667,7 +2841,7 @@ def main(argv: list[str] | None = None) -> int:
         return ui_main(args[1:])
     if args[:1] == ["deploy"]:
         if len(args) < 3:
-            print("usage: python -m clawchain.agent_proxy_cli deploy <account-id> <password> [--root-dir PATH] [--workspace PATH] [--session ID] [--run ID] [--git-context bind-existing-git|managed-session-git] [--no-start-service] [--no-auto-evm]")
+            print("usage: python -m clawchain.agent_proxy_cli deploy <account-id> <password> [--root-dir PATH] [--workspace PATH] [--session ID] [--run ID] [--git-context bind-existing-git|managed-session-git] [--no-start-service] [--no-auto-evm] [--no-auto-install-foundry] [--anvil-path PATH] [--forge-path PATH]")
             return 2
         account_id = str(args[1])
         password = str(args[2])
@@ -2677,6 +2851,9 @@ def main(argv: list[str] | None = None) -> int:
         run_id = "default-run"
         git_context_mode = "bind-existing-git"
         auto_evm = True
+        auto_install_foundry = True
+        anvil_path = None
+        forge_path = None
         start_service = True
         index = 3
         while index < len(args):
@@ -2692,6 +2869,12 @@ def main(argv: list[str] | None = None) -> int:
                 git_context_mode = str(args[index + 1]); index += 2; continue
             if args[index] == "--no-auto-evm":
                 auto_evm = False; index += 1; continue
+            if args[index] == "--no-auto-install-foundry":
+                auto_install_foundry = False; index += 1; continue
+            if args[index] == "--anvil-path" and index + 1 < len(args):
+                anvil_path = str(args[index + 1]); index += 2; continue
+            if args[index] == "--forge-path" and index + 1 < len(args):
+                forge_path = str(args[index + 1]); index += 2; continue
             if args[index] == "--no-start-service":
                 start_service = False; index += 1; continue
             print(f"unknown option: {args[index]}")
@@ -2707,6 +2890,9 @@ def main(argv: list[str] | None = None) -> int:
             default_session_id=session_id,
             default_run_id=run_id,
             auto_bootstrap_evm=auto_evm,
+            auto_install_foundry=auto_install_foundry,
+            anvil_path=anvil_path,
+            forge_path=forge_path,
             git_context_mode=git_context_mode,
         )
         write_agent_proxy_config(config_path, stored)
@@ -2747,7 +2933,7 @@ def main(argv: list[str] | None = None) -> int:
             "next_steps": [
                 f"python -m clawchain.agent_proxy_cli supervise {account_id} <password> --no-start-service",
                 f"python -m clawchain.agent_proxy_cli status {account_id}",
-                f"python -m clawchain.agent_proxy_cli proof --account {account_id} --limit 1 --save-manifest /tmp/clawchain-proof-manifest.json",
+                f"python -m clawchain.agent_proxy_cli proof --account {account_id} --limit 1 --save-manifest {str(_default_proof_manifest_path(account_id))}",
             ],
         }, ensure_ascii=True, indent=2))
         return 0
@@ -3479,7 +3665,7 @@ def main(argv: list[str] | None = None) -> int:
         written = None
         if save_manifest is not None or publish_github:
             manifest = _build_proof_manifest(account_id=account_id, cards=cards)
-            output_path = save_manifest or Path('/tmp') / f'clawchain-proof-{account_id}.json'
+            output_path = save_manifest or _default_proof_manifest_path(account_id)
             written = _save_proof_manifest(manifest=manifest, output_path=output_path)
             payload["manifest_path"] = str(written)
             payload["manifest_format"] = manifest["format"]
@@ -4036,7 +4222,7 @@ def main(argv: list[str] | None = None) -> int:
             proxy.close()
     if args[:1] == ["config-init"]:
         if len(args) < 3:
-            print("usage: python -m clawchain.agent_proxy_cli config-init <account_id> <password> [--config PATH] [--root-dir PATH] [--workspace PATH] [--session ID] [--run ID] [--no-auto-evm] [--evm-manifest PATH] [--evm-rpc URL] [--evm-chain-id N] [--evm-contract ADDR]")
+            print("usage: python -m clawchain.agent_proxy_cli config-init <account_id> <password> [--config PATH] [--root-dir PATH] [--workspace PATH] [--session ID] [--run ID] [--no-auto-evm] [--no-auto-install-foundry] [--anvil-path PATH] [--forge-path PATH] [--evm-manifest PATH] [--evm-rpc URL] [--evm-chain-id N] [--evm-contract ADDR]")
             return 2
         account_id, password = args[1:3]
         config_path = None
@@ -4045,6 +4231,9 @@ def main(argv: list[str] | None = None) -> int:
         session_id = "default-session"
         run_id = "default-run"
         auto_evm = True
+        auto_install_foundry = True
+        anvil_path = None
+        forge_path = None
         evm_manifest_path = None
         evm_rpc_url = None
         evm_chain_id = None
@@ -4063,6 +4252,12 @@ def main(argv: list[str] | None = None) -> int:
                 run_id = str(args[index + 1]); index += 2; continue
             if args[index] == "--no-auto-evm":
                 auto_evm = False; index += 1; continue
+            if args[index] == "--no-auto-install-foundry":
+                auto_install_foundry = False; index += 1; continue
+            if args[index] == "--anvil-path" and index + 1 < len(args):
+                anvil_path = str(args[index + 1]); index += 2; continue
+            if args[index] == "--forge-path" and index + 1 < len(args):
+                forge_path = str(args[index + 1]); index += 2; continue
             if args[index] == "--evm-manifest" and index + 1 < len(args):
                 evm_manifest_path = str(args[index + 1]); index += 2; continue
             if args[index] == "--evm-rpc" and index + 1 < len(args):
@@ -4081,6 +4276,9 @@ def main(argv: list[str] | None = None) -> int:
             default_session_id=session_id,
             default_run_id=run_id,
             auto_bootstrap_evm=auto_evm,
+            auto_install_foundry=auto_install_foundry,
+            anvil_path=anvil_path,
+            forge_path=forge_path,
             evm_manifest_path=evm_manifest_path,
             evm_rpc_url=evm_rpc_url,
             evm_chain_id=evm_chain_id,
@@ -4100,42 +4298,6 @@ def main(argv: list[str] | None = None) -> int:
         watcher_thread = None
         workspace_root = Path(stored.path_hint).expanduser() if stored.path_hint else None
         state_path = stored.service_state_path()
-        if is_windows():
-            proxy = TransparentAgentProxy.create(stored.to_proxy_config())
-            artifacts = proxy.prepare_launch_artifacts(
-                session_id=stored.default_session_id,
-                run_id=stored.default_run_id,
-            )
-            if stored.default_session_id:
-                watcher_stop, watcher_thread = start_codex_rollout_watcher(
-                    proxy=proxy,
-                    lock=threading.Lock(),
-                    session_id=stored.default_session_id,
-                    run_id=stored.default_run_id,
-                    actor_id="codex",
-                    workspace_root=workspace_root,
-                )
-            state = {
-                "pid": os.getpid(),
-                "config_path": str(config_path),
-                "socket_path": None,
-                "env_path": artifacts.env_path,
-                "wrapper_path": artifacts.wrapper_path,
-                "started_at_ms": int(time.time() * 1000),
-            }
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(state, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
-            try:
-                while True:
-                    time.sleep(1.0)
-            finally:
-                if watcher_stop is not None:
-                    watcher_stop.set()
-                if watcher_thread is not None:
-                    watcher_thread.join(timeout=2)
-                proxy.close()
-                if state_path.exists():
-                    state_path.unlink()
         daemon, artifacts = AgentProxyDaemon.start(
             config=stored.to_proxy_config(),
             session_id=stored.default_session_id,
@@ -4196,7 +4358,7 @@ def main(argv: list[str] | None = None) -> int:
                     ping_ok = True
                 else:
                     try:
-                        ping_ok = bool(AgentProxyDaemonClient(Path(str(state["socket_path"]))).ping().get("ok"))
+                        ping_ok = bool(AgentProxyDaemonClient(str(state["socket_path"])).ping().get("ok"))
                     except Exception:  # noqa: BLE001
                         ping_ok = False
                 print(json.dumps({
@@ -4288,7 +4450,7 @@ def main(argv: list[str] | None = None) -> int:
             ping_ok = True
         elif running and state.get("socket_path"):
             try:
-                ping_ok = bool(AgentProxyDaemonClient(Path(str(state["socket_path"]))).ping().get("ok"))
+                ping_ok = bool(AgentProxyDaemonClient(str(state["socket_path"])).ping().get("ok"))
             except Exception:  # noqa: BLE001
                 ping_ok = False
         print(json.dumps({"ok": True, "running": running, "ping_ok": ping_ok, "service": state}, ensure_ascii=True, indent=2))
@@ -4305,23 +4467,30 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         state = json.loads(state_path.read_text(encoding="utf-8"))
         pid = int(state["pid"])
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        _terminate_pid(pid, force=False)
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if not is_pid_alive(pid):
                 break
             time.sleep(0.1)
+        if is_pid_alive(pid):
+            _terminate_pid(pid, force=True)
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                if not is_pid_alive(pid):
+                    break
+                time.sleep(0.1)
         stopped = not is_pid_alive(pid)
         print(json.dumps({"ok": True, "stopped": stopped, "pid": pid}, ensure_ascii=True, indent=2))
         return 0 if stopped else 1
     if args[:1] == ["daemon-tool-json"]:
         if len(args) < 2:
-            print("usage: python -m clawchain.agent_proxy_cli daemon-tool-json <socket-path>")
+            print("usage: python -m clawchain.agent_proxy_cli daemon-tool-json <socket-endpoint>")
             return 2
-        socket_path = Path(args[1])
+        socket_path = str(args[1]).strip()
+        if not socket_path:
+            print(json.dumps({"ok": False, "error": "socket_endpoint_missing"}, ensure_ascii=True, indent=2))
+            return 1
         payload = json.loads(sys.stdin.read() or "{}")
         if not isinstance(payload, dict):
             print("stdin payload must be a JSON object")
