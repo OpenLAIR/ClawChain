@@ -4,9 +4,12 @@
   <p><strong>Secure, recoverable, and verifiable runtime control for high-privilege AI coding agents.</strong></p>
   <p>
     ClawChain turns opaque terminal agent sessions into monitored, restorable, and EVM-verifiable execution flows.
+<<<<<<< HEAD
   </p>
   <p>
     <a href="README.zh-CN.md">中文说明</a> · <a href="DEVELOPER.md">Developer Guide</a>
+=======
+>>>>>>> 4d74e79ddc9545dbe05bdc553876a4ce975f9e28
   </p>
 </div>
 
@@ -228,7 +231,11 @@ powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1 --bootstr
 
 ClawChain prefers local Foundry on Windows. If automatic Foundry download fails, the usual cause is that the machine cannot reach GitHub Releases or the release asset download is blocked by local network policy.
 
+<<<<<<< HEAD
 The managed Foundry location for the default account is:
+=======
+ClawChain's managed Foundry location for the default account is:
+>>>>>>> 4d74e79ddc9545dbe05bdc553876a4ce975f9e28
 
 ```text
 %USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin
