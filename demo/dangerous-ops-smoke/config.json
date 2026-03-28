@@ -1,0 +1,6 @@
+{
+  "app": "demo-app",
+  "log_level": "info",
+  "api_endpoint": "https://api.example.com",
+  "max_retries": 3
+}

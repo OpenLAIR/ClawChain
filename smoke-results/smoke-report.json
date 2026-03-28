@@ -1,0 +1,361 @@
+{
+  "summary": {
+    "ok": true,
+    "platform": "windows",
+    "account": "dangerous-ops-windows",
+    "root_dir": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579",
+    "fixture_workspace": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures",
+    "scenarios_run": [
+      "destructive_delete",
+      "destructive_move",
+      "config_integrity_mutation",
+      "in_place_file_edit",
+      "destructive_truncate",
+      "secret_access"
+    ],
+    "results": [
+      {
+        "scenario": "destructive_delete",
+        "ok": true,
+        "target_deleted": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-757d263d8473",
+            "tool_name": "fs.delete",
+            "success": true,
+            "output": {
+              "deleted_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\notes.txt"
+            },
+            "error": null,
+            "protections": [
+              {
+                "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\notes.txt",
+                "command_preview": "None",
+                "plans": [
+                  {
+                    "recovery_id": "recovery-a4732bd916e34ec1a3735b1d555475da",
+                    "source_kind": "snapshot",
+                    "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\notes.txt",
+                    "risk_reason": "destructive_delete",
+                    "locator_record": {
+                      "recovery_id": "recovery-a4732bd916e34ec1a3735b1d555475da",
+                      "created_ts_ms": 1774704581587,
+                      "source_kind": "snapshot",
+                      "target_path_hash": "de5f9f90a9a0567e8ef5ffc1d18b9fee69e695bf51986e7fbbe4e55b91bc872e",
+                      "target_name_hint": "notes.txt",
+                      "target_digest": "5ce77908f0e3385d9c4cab51e64bfa9ccf2871e4f9107f2a4349a89b71835316",
+                      "locator": {
+                        "algorithm": "AES-256-GCM",
+                        "recipient_key_id": "500f2043f5ba735d65f22fa98b323d21746bbf125c6594c0997c7946218ce415",
+                        "encrypted_key_b64": "ZZi/M/iP/v2YD9+HjRfFd9idhm8tMQnxvNDeAJAYJ8FEdL3QSRvqPlGlfRPlhr+Ztbi1k5AAlkMvJOpXPOfOhpY6VF/2MXTc2wWvj3/4mgwp2aqXCk8jwo/ou/GfPrL34OU0yh1uXHaTi5iscxC4ibGD4XWGU1rc3pkCabSRhC6v/OKvcSjpijRacqTwJ/PrKU/e2VcDTIuCbtFe+SIx8JQUdtMF3O5+KJVfnpiVemTEl+v0wlTiiDRYPOpeqWWESs2QDeSUI7Cv24cYt/hRvbHJi4gLhQ8OtTq3hRW0G3K5Tj1i7kOEYmmQj8HgVpTs2DNTOaONX/nWhScJ+kN9oA==",
+                        "nonce_b64": "2DietQOE5pwYK5Y6",
+                        "ciphertext_b64": "fsAAebASjTxItxb8OJ3ZgjOrvUbMq736Nr19UMIk/RL33Lr4VWEnYDpJSlG8RYxHRrCU6wprYMIQbRKg7cAR3yhPgRQhZhJYBu4jzalNRMSRR6ZnXirYeb+HdlA0i0ACakHrP9smKooi4FYYwTVEiwUOPq/IKBFwpJXAQeNK/MTMOFSdEJwfnzGegENfiHLurmEI4GVkSQD7DZTI1zH5rUQ8YQxigNhAYlSseHITDpzlrVgTK84Y3A7sZEPhGgrweE8R7iqWVOLlH6QaalVHFz08+AkOqPLhCss4Ikz7+YQ7tqNtyGff7Deafx5ktDVvnUZ926F1gVQU5QIPzBIqhqryhmtZoLJc2y16nFbBRrRDwV1KwbY1C/RVyxRIQ2iRXPWgsn0NPNJ7Xz/qOJHw/5xXZgKXV4iBRVXaDLvEKdOttxU9ltB7X9ZY4uALTffauaZW4vGX0Zf9g3uwg/M7DpFEcNN5HeULtiTg/r3vHCkyEJ7zFeaao5YPgAKADwjyK1cJ7TlDSSbM7rCTIyYroP/AIi4RJg==",
+                        "key_encryption_algorithm": "RSA-OAEP-SHA256",
+                        "ciphertext_digest": "186a63e7950049f6cae7b57c056de4f23e51979fcb94d7fbcecff3c9cc0ff777"
+                      },
+                      "risk_reason": "destructive_delete"
+                    }
+                  }
+                ]
+              }
+            ],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      },
+      {
+        "scenario": "destructive_move",
+        "ok": true,
+        "file_renamed": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-4a0f2ba0c1a4",
+            "tool_name": "fs.move",
+            "success": true,
+            "output": {
+              "src": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\rename-me.txt",
+              "dst": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\renamed-output.txt"
+            },
+            "error": null,
+            "protections": [
+              {
+                "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\rename-me.txt",
+                "command_preview": "None",
+                "plans": [
+                  {
+                    "recovery_id": "recovery-19f3319af7aa474e9be48fc31f8a787a",
+                    "source_kind": "snapshot",
+                    "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\rename-me.txt",
+                    "risk_reason": "destructive_move",
+                    "locator_record": {
+                      "recovery_id": "recovery-19f3319af7aa474e9be48fc31f8a787a",
+                      "created_ts_ms": 1774704582517,
+                      "source_kind": "snapshot",
+                      "target_path_hash": "45a8efc58d765e91f6fa9a81a1059b7ef56d38503df2b07f44e9d6df1edf58e7",
+                      "target_name_hint": "rename-me.txt",
+                      "target_digest": "061b053ab32217147bf0af7d32113f7fa64ffef22b2f3127c6b31d5ae0f35e33",
+                      "locator": {
+                        "algorithm": "AES-256-GCM",
+                        "recipient_key_id": "500f2043f5ba735d65f22fa98b323d21746bbf125c6594c0997c7946218ce415",
+                        "encrypted_key_b64": "tO1+ZrWjQ7ztp/nu26F46yeb9xLElQ+P1Q+22QTVV2KORvTL2xZoD5iq4WrYlgK6UBf9zRbpqUYDacOqJrugqLiYW/qw7GFuRcou5/JxrCYbp6chZSJ4yPp5opETCqovVYSukfkBaTRDj529jxefTAjemav7kUOY3GjUYMRY34JiUFq4mF0hI5LPQYDoLR85CfOt6Xp3iJo+PVZIRNpSMyRAOBatJqu/8645Wg34j2Ev8MXY4uJgaIeu7o3NbBd9i9KpKoPyapenoZOuS5Qml+CIr9xkzwHL8wJu9C0MEzryWD0/72R7fA3ZZnN6PxXphPjULHhuLzv2zOpNNnMseg==",
+                        "nonce_b64": "biaYl4EzZ84Qgid2",
+                        "ciphertext_b64": "m1MsLv8BNqM9JPy4HkbY+EqCi+/FJqsCi5D8vR77coR2E1mfUdBVj2WQ//8TXwv43OLkQGDj26aBP0HkQ3WBQzNXkHF2p0zhtEIUz+oYSVOpHYVWSOheLyT3EQuDswtqJHcGhuAwDFF9sxzoLJMpV1lYPpkacJhILdN0DeRRajtBgib0yIEnkPJp6J55AH0RYzrqDYdkwIvqRI8fl5Oj0RnqohkV/HdJhV0bJd7eRwDKi6FdkKhVTfvvC+CxRdZpQTIy77ci5wtm0Atu2R9y/RhEwO434R684aCVhf0lWWTi3lnY7X5jZWAjm0k+xL2ZKIHtVfQzEzHK0ZgLIvbPadt8A1OfRSys0d3mQfgP0vz6iyGdU1mZ8g6xNkeXloVSVQzBZxNyw3bddagp+R9CiKwB842neVoYC5prXEBBEUEbq3CzGRkSh82DHT7/82BSwBqi4cTC8QOka8QvudBtXNzV28ph+enOteniBDU8e2HxXUgW5LGqHMvsoomQf3G05Da5OSPTX5qZy/B7b599VB6414P4YBahWuKusEY+",
+                        "key_encryption_algorithm": "RSA-OAEP-SHA256",
+                        "ciphertext_digest": "72c08d6e8d4e8a37088959662f481b89bbcee9c6fe119662c06f9ea1aa50d76e"
+                      },
+                      "risk_reason": "destructive_move"
+                    }
+                  }
+                ]
+              }
+            ],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      },
+      {
+        "scenario": "config_integrity_mutation",
+        "ok": true,
+        "config_overwritten": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-7c9e56a1c0bc",
+            "tool_name": "fs.write_text",
+            "success": true,
+            "output": {
+              "written_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\config.json",
+              "bytes": 119
+            },
+            "error": null,
+            "protections": [
+              {
+                "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\config.json",
+                "command_preview": "None",
+                "plans": [
+                  {
+                    "recovery_id": "recovery-4ce0147b34af4b8b96db9ca41545271a",
+                    "source_kind": "snapshot",
+                    "target_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures",
+                    "risk_reason": "config_integrity_mutation",
+                    "locator_record": {
+                      "recovery_id": "recovery-4ce0147b34af4b8b96db9ca41545271a",
+                      "created_ts_ms": 1774704583453,
+                      "source_kind": "snapshot",
+                      "target_path_hash": "e7773a2e9c7bdb4d4330d02944a38ab69bbd532ef2ddf7a5955cfef303cf3e1a",
+                      "target_name_hint": "fixtures",
+                      "target_digest": "47e983f3523f0d30edeffb7cbb7a48614578af5b0f1e17e6019b10f0348780e3",
+                      "locator": {
+                        "algorithm": "AES-256-GCM",
+                        "recipient_key_id": "500f2043f5ba735d65f22fa98b323d21746bbf125c6594c0997c7946218ce415",
+                        "encrypted_key_b64": "NRYKS4RsBVsxCQ9NgzaoLx5nUwe/JslbpKngClGcQy13nvqFcJskFvayIwCa3pL4KKQnaU4wvWp8Tkl+3eHJE9yLlOhD7VPqbrEK+BwG8k2d2LXrRXdw5y4cCPrKTEqzxNhBT+adkbAVqpxlVb70JwWXc5uA9UpaeF3DO5JMTdJmguCK3IPshO5GzfNQ/obMP5a4ahj1GsB3kyS4EbT7dJHUXgT/dPyls9QVzsVAxDDHcHjAdIQ11tcnEXaREXnDE7oNfV8V+ybBffcvDCu5eBKmraUCsPHQE9Rqf3KDpBakUt61psyrwpdZj+I3VZmqv1mdNWuL2cNL/7G7Slwkkg==",
+                        "nonce_b64": "hSjDxdglp9n77hj2",
+                        "ciphertext_b64": "fX0ur3mbkrrXgQcZZLAHYqqqK/BbzZvBfHWj7+9YNmeNbrdL7/DRXC3mrQCawzB1vYcFJdstOTJG7o+nwbMRHI/7D8sb1Oc38L3MqRKCNx1Mn0Sl6H8VisnXJ6smbC3L7mkL/IrIHO1rzC4acKlMw0R3RPT/nUa+y7sV26hEE8p3jLkIFDn6l0MtzwDv0b9AMZyFYdvp83If3/67cSb5KkWWG9Sj/bUL2P+7OiXEwzyDB+gzw50KEirP4E0cCTEwftj/1CIYzbJ9yIXf8jLw7XRfZQYTYZaOEiPa/ADPqRp+GpQ9EfHfnq4sfw/sR8g/rRhJWacaQmhNbQJUXseQBJeYuvDXouENlqZx0FwyBtYXkcvynWEjBulOCBVmTXGFmVJuL+kK/mI4+hLTZDBtu1R942PtW5SbIgHO1VBGcCQxY/z9KxTKuS4fchuC1I7QW6kkuQm/EEZCUKXS2av5fGcvyGqt95UQUH1SUBeyewl1Q6ejervLdkLGCrCfVhmZedNYU3KWWDCVXILGg43D",
+                        "key_encryption_algorithm": "RSA-OAEP-SHA256",
+                        "ciphertext_digest": "aa0e329e7a6182ca024f2f2b0581e1e3035f0474e5cd426c37b91f227be3c5ed"
+                      },
+                      "risk_reason": "config_integrity_mutation"
+                    }
+                  }
+                ]
+              }
+            ],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      },
+      {
+        "scenario": "in_place_file_edit",
+        "ok": true,
+        "edit_applied": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-8244687e9880",
+            "tool_name": "fs.write_text",
+            "success": true,
+            "output": {
+              "written_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\data.csv",
+              "bytes": 81
+            },
+            "error": null,
+            "protections": [],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      },
+      {
+        "scenario": "destructive_truncate",
+        "ok": true,
+        "file_truncated": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-f2eff8ecf17e",
+            "tool_name": "fs.write_text",
+            "success": true,
+            "output": {
+              "written_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\data.csv",
+              "bytes": 0
+            },
+            "error": null,
+            "protections": [],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      },
+      {
+        "scenario": "secret_access",
+        "ok": true,
+        "response": {
+          "ok": true,
+          "result": {
+            "session_id": "dangerous-ops-smoke",
+            "run_id": "dangerous-ops-run",
+            "tool_call_id": "tool-15dc70f579a6",
+            "tool_name": "system.run",
+            "success": true,
+            "output": {
+              "exit_code": 0,
+              "stdout": "Get-Content -Path 'C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\fixtures\\secret.env'\n",
+              "stderr": ""
+            },
+            "error": null,
+            "protections": [],
+            "bootstrap": {
+              "sidecar_enabled": false,
+              "anchor_backend": "LocalAnchorBackend",
+              "evm_manifest_path": null,
+              "evm_bootstrapped": false,
+              "runtime_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\runtime",
+              "evidence_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\evidence-remote",
+              "vault_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\recovery-vault",
+              "wrapper_root": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\bin",
+              "service_state_path": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\agent-proxy-service.json"
+            }
+          },
+          "verify_ok": true,
+          "finding_codes": []
+        }
+      }
+    ],
+    "proof_manifest": "C:\\Users\\labpc\\AppData\\Local\\Temp\\clawchain-dangerous-ops-1774704579\\dangerous-ops-windows\\proof-manifest.json",
+    "ui_url": null
+  },
+  "chain_checks": {
+    "events_written": true,
+    "invoke_events_count": 6,
+    "policy_decision_events_count": 6,
+    "recovery_planned_count": 3,
+    "invoke_events_ok": true,
+    "policy_decision_events_ok": true,
+    "anchor_receipts_count": 6,
+    "anchor_receipts_ok": true,
+    "impact_sets_count": 3,
+    "risk_reasons_with_recovery": [
+      "config_integrity_mutation",
+      "destructive_delete",
+      "destructive_move"
+    ],
+    "recorded_risk_reasons": [
+      "config_integrity_mutation",
+      "destructive_delete",
+      "destructive_move"
+    ],
+    "expected_risk_reasons": [
+      "config_integrity_mutation",
+      "destructive_delete",
+      "destructive_move"
+    ],
+    "missing_risk_reasons": [],
+    "audit_only_risk_reasons": [
+      "destructive_truncate",
+      "in_place_file_edit",
+      "secret_access"
+    ],
+    "impact_sets_ok": true,
+    "impact_set_cli": {
+      "skipped": false,
+      "impact_set_count": 3,
+      "risk_reasons_detected": [
+        "config_integrity_mutation",
+        "destructive_delete",
+        "destructive_move"
+      ],
+      "ok": true
+    },
+    "chain_verify_ok": true
+  }
+}

@@ -1,0 +1,7 @@
+Project notes
+=============
+This file contains important project notes.
+Do not delete or truncate this file.
+Line 3: critical audit information.
+Line 4: deployment checklist item.
+Line 5: contact info for on-call team.
