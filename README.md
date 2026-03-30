@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="assets/logo/clawchain-logo.svg" alt="ClawChain logo" width="128" height="128">
+  <img src="assets/logo/ClawChain.png" alt="ClawChain logo" width="148">
   <h1>ClawChain</h1>
-  <p><strong>Secure, recoverable, and verifiable runtime control for high-privilege AI coding agents.</strong></p>
+  <p><strong>Secure, recoverable, and traceable runtime control for high-privilege AI coding agents.</strong></p>
   <p>
-    ClawChain turns opaque terminal agent sessions into monitored, restorable, and EVM-verifiable execution flows.
+    This isolated repository is the integration lab for the generalized shell-agent adapter layer that extends ClawChain beyond Codex.
   </p>
   <p>
     <a href="README.zh-CN.md">中文说明</a> · <a href="DEVELOPER.md">Developer Guide</a>
@@ -12,9 +12,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12" />
-  <img src="https://img.shields.io/badge/Runtime-Agent%20Safety-111827?style=for-the-badge" alt="Runtime Agent Safety" />
-  <img src="https://img.shields.io/badge/Recovery-Snapshot%20Backed-0F766E?style=for-the-badge" alt="Snapshot-backed recovery" />
-  <img src="https://img.shields.io/badge/Chain-EVM%20Verifiable-7C3AED?style=for-the-badge" alt="EVM verifiable" />
+  <img src="https://img.shields.io/badge/Validated-Codex-111827?style=for-the-badge" alt="Validated Codex" />
+  <img src="https://img.shields.io/badge/Validated-Claude%20Code-C2410C?style=for-the-badge" alt="Validated Claude Code" />
+  <img src="https://img.shields.io/badge/Chain-EVM%2031337-7C3AED?style=for-the-badge" alt="EVM 31337" />
 </p>
 
 ## Dashboard
@@ -23,65 +23,56 @@
   <img src="assets/screenshots/dashboard.png" alt="ClawChain dashboard" width="1200">
 </p>
 
-The dashboard is the main operator surface for session discovery, `Join Monitor`, dangerous-operation review, restore, proof export, and chain status inspection.
+The dashboard is the operator surface for session discovery, `Join Monitor`, dangerous-operation review, restore, proof export, and chain inspection.
 
-## Overview
+## What This Repo Is
 
-ClawChain is a runtime safety layer for AI coding agents that can execute real commands on a real machine.
+This repository is not the stable mainline release repository.
 
-Its current product goal is straightforward:
+It is the isolated integration branch where ClawChain is being generalized from a Codex-first path into a reusable shell-agent control layer. The current focus of this fork is to make the integration interface extensible and validate a real Claude Code workflow before merging the changes back into the main project.
+
+## Why ClawChain Exists
+
+High-privilege coding agents can execute real commands on real machines. That creates four practical failures that are hard to manage in a normal terminal workflow:
+
+- execution becomes opaque
+- evidence is easy to lose
+- recovery is incomplete after destructive actions
+- post-incident tracing is difficult
+
+ClawChain turns those sessions into a monitored runtime with controlled onboarding, dangerous-operation capture, snapshot-backed recovery, proof export, and optional EVM anchoring.
+
+## Validated In This Fork
+
+### Stable and validated now
+
+- Codex main path remains available and has been regression-checked after the adapter refactor.
+- Claude Code has been integrated through the new shell-agent adapter path.
+- Claude Code end-to-end validation has passed for `Join Monitor -> delete -> Restore -> proof -> verify`.
+- Linux and Windows setup, service, UI, and local EVM bootstrap have been validated in this branch.
+
+### In progress
+
+- Gemini CLI is planned next on top of the same adapter layer.
+- Additional shell-style agents can be added by registering a new agent profile instead of copying the old Codex-specific launcher logic.
+
+## What Changed In This Fork
+
+- A generalized shell-agent profile layer for launcher, resume, handoff, and environment setup
+- Claude Code integration built on the shared adapter path instead of Codex-only wiring
+- Stronger Claude session-id detection and routing behavior
+- UI fixes for mixed native/managed terminals and session-card misrouting
+- Faster live session inspection on Linux by reducing expensive process metadata calls
+
+## Core Capabilities
 
 - discover a live agent session
-- bring it into a monitored control path
-- detect destructive delete-style operations
-- preserve recovery material before loss becomes permanent
+- bring that session into a monitored control path
+- detect destructive operations before loss becomes permanent
+- preserve snapshot-backed recovery material
 - restore affected files or directories
-- export a readable proof log
-- anchor and verify proof fields on an EVM backend
-
-This repository is not a generic blockchain demo. The chain is used to strengthen proof integrity for risky agent actions. The product itself is the control plane around monitoring, recovery, evidence, and verification.
-
-## Current Scope
-
-### Stable today
-
-- Codex is the primary end-to-end supported agent path.
-- Linux and Windows both support the main monitored workflow.
-- One-click setup scripts exist for Linux/macOS and Windows.
-- Snapshot-backed delete recovery, readable proof export, and EVM verification work together.
-
-### Intentionally narrow
-
-- Recovery is currently focused on destructive delete-style operations.
-- Other risk classes may be recorded for audit without claiming broad rollback support.
-- Multi-agent coverage exists in the codebase, but not all integrations should be treated as equally mature.
-
-## Key Capabilities
-
-- Monitored session onboarding with controlled resume and handoff commands
-- Snapshot-backed delete recovery through a recovery vault
-- Readable proof export per monitored session
-- Encrypted local proof archive for downloaded proof logs
-- Local EVM bootstrap for chain anchoring and verification
-- Cross-platform service and daemon flow for Linux and Windows
-- UI for sessions, activity, restore, proof export, and chain status
-
-## Repository Layout
-
-- `clawchain/`
-  Main runtime, monitoring, recovery, proof, UI, and chain integration logic.
-- `contracts/`
-  `CommitmentAnchor.sol` and ABI used by local EVM anchoring.
-- `scripts/`
-  Smoke scripts and validation helpers.
-- `demo/delete-smoke/`
-  Tiny assets for delete and restore validation.
-- `setup_clawchain.cmd`
-  One-click Windows setup entrypoint.
-- `setup_clawchain.sh`
-  One-click Linux/macOS setup entrypoint.
-- `DEVELOPER.md`
-  Detailed developer workflow, architecture, and testing guide.
+- export readable proof logs
+- verify proof fields locally and on an EVM backend
 
 ## Requirements
 
@@ -90,16 +81,13 @@ This repository is not a generic blockchain demo. The chain is used to strengthe
 - Git
 - For local chain bootstrap:
   - preferred: Foundry (`anvil`, `forge`)
-  - optional fallback: Docker where available
+  - optional fallback: Docker when available
 
 ## Installation
 
 ```bash
 conda create -y -n ClawChain python=3.12 pip
 conda activate ClawChain
-```
-
-```bash
 cd <repo-root>
 pip install -r requirements.txt
 pip install -e .
@@ -119,16 +107,16 @@ setup_clawchain.cmd 8888
 bash setup_clawchain.sh 8888
 ```
 
-The setup scripts do the following:
+The setup flow does the following:
 
-1. stop an old local ClawChain service for the selected account if it exists
-2. create or refresh the account configuration
-3. try local EVM bootstrap
-4. start the ClawChain background service
-5. verify service status
-6. launch the UI
+1. stops an old ClawChain service for the selected account if it exists
+2. creates or refreshes the account configuration
+3. bootstraps local EVM if possible
+4. starts the background service
+5. verifies service status
+6. launches the UI
 
-By default, setup is best-effort for chain bootstrap. If you want setup to fail unless local EVM bootstrap succeeds:
+If you want setup to fail unless local chain bootstrap succeeds:
 
 ### Windows strict mode
 
@@ -153,20 +141,21 @@ http://127.0.0.1:8888
 
 ### Remote Linux host
 
-If you run Linux setup from an SSH session, `run_clawchain_ui.sh` automatically switches to a remote-friendly binding and prints the remote browser URL.
+If you run Linux setup from SSH, `run_clawchain_ui.sh` automatically switches to a remote-friendly bind and prints the remote browser URL.
 
-## First Monitored Workflow
+## First Claude Workflow To Validate
 
-1. Start or locate a live Codex session.
+1. Start a fresh Claude Code session.
 2. Open the ClawChain UI.
 3. Click `Join Monitor`.
-4. Perform a delete-style destructive action.
-5. Confirm the operation appears in history.
-6. Use `Restore`.
-7. Export the proof log.
-8. Confirm the exported proof shows EVM fields when local chain bootstrap is enabled.
+4. Continue in the ClawChain-managed terminal, not the original native terminal.
+5. Perform a delete-style destructive action.
+6. Confirm the operation appears in history.
+7. Run `Restore`.
+8. Export the proof log.
+9. Confirm the exported proof shows EVM fields when local chain bootstrap is enabled.
 
-For a freshly anchored proof, the exported proof should typically include:
+For a successful anchored proof, you should typically see:
 
 - `anchor_backend: "evm:31337"`
 - `anchor_mode: "evm-anchored"`
@@ -184,18 +173,6 @@ For a freshly anchored proof, the exported proof should typically include:
 python -m clawchain.agent_proxy_cli ui --host 127.0.0.1 --port 8888
 ```
 
-### Windows UI launcher
-
-```bat
-run_clawchain_ui.cmd 8888
-```
-
-### Linux/macOS UI launcher
-
-```bash
-bash run_clawchain_ui.sh 8888
-```
-
 ### Manual chain bootstrap
 
 ```bash
@@ -208,7 +185,13 @@ python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-loc
 python -m clawchain.agent_proxy_cli chain-status local-operator
 ```
 
-### Smoke validation
+### Claude adapter smoke
+
+```bash
+python scripts/smoke_claude_adapter.py
+```
+
+### Platform smoke
 
 #### Linux / macOS
 
@@ -219,126 +202,28 @@ bash scripts/run_linux_smoke.sh --bootstrap-local-evm
 
 #### Windows
 
-```powershell
+```bat
 powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1 --bootstrap-local-evm
 ```
 
-## Windows Foundry Manual Fallback
+## Repository Layout
 
-ClawChain prefers local Foundry on Windows. If automatic Foundry download fails, the usual cause is that the machine cannot reach GitHub Releases or the release asset download is blocked by local network policy.
+- `clawchain/`
+  Main runtime, monitoring, recovery, proof, UI, and agent integration logic.
+- `assets/`
+  GitHub-facing logo, diagrams, and dashboard screenshots.
+- `contracts/`
+  `CommitmentAnchor.sol` and ABI used by local EVM anchoring.
+- `scripts/`
+  Platform smoke scripts, dangerous-ops validation, and Claude adapter smoke.
+- `setup_clawchain.cmd`
+  One-click Windows setup entrypoint.
+- `setup_clawchain.sh`
+  One-click Linux/macOS setup entrypoint.
+- `DEVELOPER.md`
+  Detailed architecture, development workflow, and test guide.
 
-The managed Foundry location for the default account is:
+## Branch Status
 
-```text
-%USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin
-```
-
-ClawChain only needs two binaries there:
-
-- `anvil.exe`
-- `forge.exe`
-
-### Option A: Download the latest official Windows asset with PowerShell
-
-Run the following in PowerShell:
-
-```powershell
-$toolRoot = Join-Path $env:USERPROFILE ".clawchain-agent\local-operator\_internal\chain\toolchains\foundry"
-$binDir = Join-Path $toolRoot "bin"
-$zipPath = Join-Path $env:TEMP "clawchain-foundry.zip"
-$unpackDir = Join-Path $env:TEMP "clawchain-foundry-unpack"
-
-New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-Remove-Item $unpackDir -Recurse -Force -ErrorAction SilentlyContinue
-
-$release = Invoke-RestMethod -Headers @{ "User-Agent" = "clawchain-manual-foundry" } `
-  -Uri "https://api.github.com/repos/foundry-rs/foundry/releases/latest"
-$asset = $release.assets |
-  Where-Object { $_.name -match 'win32_amd64\.zip$' } |
-  Select-Object -First 1
-if (-not $asset) { throw "No Windows Foundry asset found in the latest release." }
-
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-Expand-Archive -Path $zipPath -DestinationPath $unpackDir -Force
-Copy-Item (Get-ChildItem $unpackDir -Recurse -Filter anvil.exe | Select-Object -First 1).FullName $binDir -Force
-Copy-Item (Get-ChildItem $unpackDir -Recurse -Filter forge.exe | Select-Object -First 1).FullName $binDir -Force
-```
-
-Then rerun:
-
-```bat
-python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
-```
-
-### Option B: Download on another machine and copy the binaries manually
-
-If the Windows host cannot reach GitHub at all:
-
-1. Download the latest Windows Foundry release asset from:
-   `https://github.com/foundry-rs/foundry/releases/latest`
-2. Pick the asset that ends with `win32_amd64.zip`.
-3. Extract it.
-4. Copy `anvil.exe` and `forge.exe` into:
-   `%USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin`
-5. Rerun:
-
-```bat
-python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
-```
-
-### Option C: Keep Foundry elsewhere and point ClawChain at it
-
-If you already have Foundry installed in another location, you can point ClawChain at explicit paths:
-
-```bat
-set CLAWCHAIN_ANVIL_PATH=C:\tools\foundry\anvil.exe
-set CLAWCHAIN_FORGE_PATH=C:\tools\foundry\forge.exe
-setup_clawchain.cmd 8888
-```
-
-You can also do the same with `deploy`:
-
-```bat
-python -m clawchain.agent_proxy_cli deploy local-operator local-operator ^
-  --workspace E:\path\to\workspace ^
-  --anvil-path C:\tools\foundry\anvil.exe ^
-  --forge-path C:\tools\foundry\forge.exe ^
-  --no-start-service
-```
-
-Official Foundry sources:
-
-- https://github.com/foundry-rs/foundry/releases/latest
-- https://api.github.com/repos/foundry-rs/foundry/releases/latest
-- https://getfoundry.sh/reference/forge/forge.html
-
-## Troubleshooting
-
-### The UI looks stale or still shows an old process
-
-Re-run the same UI command on the same port. The launcher is designed to replace an older listener on that port.
-
-### Windows setup says chain bootstrap failed
-
-Run the manual diagnostic first:
-
-```bat
-python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
-```
-
-Read these fields in the JSON output:
-
-- `bootstrap_diagnostics.anvil_path`
-- `bootstrap_diagnostics.forge_path`
-- `bootstrap_diagnostics.managed_foundry_bin_contents`
-- `bootstrap_diagnostics.managed_foundry_install_error`
-
-### Proof export still shows `local-json`
-
-That usually means you exported a proof from an older monitored session created before chain bootstrap completed. Start a new monitored session and export a fresh proof.
-
-## Developer Documentation
-
-For architecture notes, setup internals, testing, acceptance criteria, and debugging guidance, see [DEVELOPER.md](DEVELOPER.md).
+This branch is intended for isolated integration and validation. It is the place to stabilize the generalized agent-adapter layer before merging the work back into the main ClawChain repository.

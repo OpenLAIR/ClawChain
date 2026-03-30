@@ -1068,15 +1068,26 @@ def _scan_processes_via_tasklist() -> list[str] | None:
 def _scan_processes_via_pgrep() -> list[str]:
     if os.name == "nt":
         return []
+    # On macOS, pgrep -af does not print the full command line (only PIDs).
+    # Use "ps -eo pid,args" instead, which works on both macOS and Linux.     
     try:
         probe = subprocess.run(
-            ["pgrep", "-af", "."],
+            # ["pgrep", "-af", "."],
+            ["ps", "-eo", "pid,args"],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError:
-        return []
+        try:
+            probe = subprocess.run(
+                ["pgrep", "-af", "."],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return []
     if probe.returncode not in (0, 1):
         return []
     return [line.strip() for line in probe.stdout.splitlines() if line.strip()]
