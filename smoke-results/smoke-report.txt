@@ -1,0 +1,41 @@
+============================================================
+  ClawChain Dangerous-Ops Smoke Test Report
+  Generated : 2026-03-28 21:29:49
+  Platform  : windows
+  Account   : dangerous-ops-windows
+  Root dir  : C:\Users\labpc\AppData\Local\Temp\clawchain-dangerous-ops-1774704579
+============================================================
+
+SCENARIO RESULTS
+----------------------------------------
+  [PASS] destructive_delete
+  [PASS] destructive_move
+  [PASS] config_integrity_mutation
+  [PASS] in_place_file_edit
+  [PASS] destructive_truncate
+  [PASS] secret_access
+
+BLOCKCHAIN / CHAIN-LOG VERIFICATION
+----------------------------------------
+  [PASS] events_written
+  [PASS] invoke_events_ok
+  [PASS] policy_decision_events_ok
+  [PASS] anchor_receipts_ok
+  [PASS] impact_sets_ok
+  [PASS] chain_verify_ok
+  [PASS] impact_set_cli (count=3)
+
+CHAIN-LOG DETAILS
+----------------------------------------
+  invoke_events_count: 6
+  policy_decision_events_count: 6
+  recovery_planned_count: 3
+  anchor_receipts_count: 6
+  impact_sets_count: 3
+  recorded_risk_reasons: ['config_integrity_mutation', 'destructive_delete', 'destructive_move']
+  missing_risk_reasons: []
+
+
+============================================================
+  RESULT: *** ALL TESTS PASSED ***
+============================================================
