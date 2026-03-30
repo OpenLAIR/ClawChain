@@ -3,7 +3,7 @@
   <h1>ClawChain</h1>
   <p><strong>面向高权限 AI Coding Agent 的安全、可恢复、可追溯运行时控制层。</strong></p>
   <p>
-    这个隔离仓是 ClawChain 通用 shell-agent adapter 层的集成实验仓，用来把 ClawChain 从 Codex 主路径扩展到更多 agent。
+    ClawChain 将原本不透明的 Agent 会话转化为可监控、可恢复、可导出 proof、可链上校验的执行流程。
   </p>
   <p>
     <a href="README.md">English</a> · <a href="DEVELOPER.md">开发者文档</a>
@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Validated-Codex-111827?style=for-the-badge" alt="Validated Codex" />
   <img src="https://img.shields.io/badge/Validated-Claude%20Code-C2410C?style=for-the-badge" alt="Validated Claude Code" />
+  <img src="https://img.shields.io/badge/Recovery-Snapshot%20Backed-0F766E?style=for-the-badge" alt="Snapshot-backed recovery" />
   <img src="https://img.shields.io/badge/Chain-EVM%2031337-7C3AED?style=for-the-badge" alt="EVM 31337" />
 </p>
 
@@ -25,54 +26,75 @@
 
 这个 dashboard 是 ClawChain 的主要操作界面，用于发现会话、`Join Monitor`、查看危险操作、执行恢复、导出 proof，以及检查链状态。
 
-## 这个仓库的定位
+## 项目概述
 
-这不是主仓的稳定发布版本。
+ClawChain 是一层面向 AI Coding Agent 的运行时安全控制层，针对的是能够直接在真实机器上执行命令的高权限 Agent。
 
-这个仓库是隔离出来的集成分支，用来把原本偏 Codex 的接入方式抽象成可扩展的 shell-agent 控制层，并在不影响主仓的前提下先验证真实的 Claude Code 主链路，再准备回并主仓。
+它聚焦解决四类在真实终端环境里很难处理的问题：
 
-## ClawChain 要解决什么问题
+- 会话执行过程不透明
+- 危险操作之后证据容易丢失
+- 文件或目录被破坏后恢复不完整
+- 事故发生后难以做统一溯源
 
-高权限 coding agent 可以直接在真实机器上执行命令，这会带来四类非常现实的问题：
+ClawChain 将这些会话转成一个受控运行环境，并提供：
 
-- 执行过程不透明
-- 证据容易丢失
-- 破坏操作后的恢复不完整
-- 事后排查和溯源困难
+- 受控接管与 handoff
+- 危险操作捕获
+- 基于 snapshot 的恢复材料保留
+- 可读 proof 导出
+- 可选的 EVM 锚定与校验
 
-ClawChain 的目标，就是把这类会话转成一个可监控、可恢复、可导出 proof、可链上校验的受控运行环境。
+这个项目不是一个单纯的区块链演示。链后端的作用是增强危险操作 proof 的完整性，真正的产品主体是围绕监控、恢复、证据和验证构建的控制平面。
 
-## 这个分支已经验证的内容
+## 已验证的 Agent 支持
 
-### 当前稳定并已验证
+### 当前已验证
 
-- Codex 主路径在 adapter 重构后已经做过回归检查。
-- Claude Code 已经接入新的通用 shell-agent adapter 层。
-- Claude Code 已完成 `Join Monitor -> delete -> Restore -> proof -> verify` 端到端验证。
-- Linux 和 Windows 的 setup、service、UI 以及本地 EVM bootstrap 已在这个分支验证通过。
+- Codex
+  已打通端到端主流程，包括监控、恢复、proof 导出和链校验。
+- Claude Code
+  已打通真实 session 识别、受控重拉起、删除恢复、proof 导出和 EVM 校验。
 
-### 正在推进
+### 可扩展接入路径
 
-- Gemini CLI 会在同一套 adapter 层之上继续接入。
-- 后续其他 shell 风格 agent 可以通过注册 agent profile 接入，而不需要复制 Codex 的专用逻辑。
-
-## 这个分支相对主仓的核心变化
-
-- 抽象出通用 shell-agent profile 层，用于 launcher、resume、handoff 和环境注入
-- Claude Code 改为走共享 adapter 路径，而不是继续堆在 Codex 专用逻辑上
-- 强化了 Claude session id 识别和接管逻辑
-- 修复了 mixed native/managed terminal、session card 串号等 UI 问题
-- 在 Linux 上减少了昂贵的进程元数据调用，提升 live session 检查速度
+当前运行时已经抽象出共享的 adapter 层，用于支持更多 shell 风格 agent。后续新 agent 可以通过扩展 profile 模型接入，而不需要复制旧的 launcher 逻辑。
 
 ## 核心能力
 
-- 发现正在运行的 agent 会话
+- 发现正在运行的 Agent 会话
 - 将会话纳入受控监控路径
-- 捕获删除类高危操作
+- 在损失永久发生前检测危险操作
 - 保留基于 snapshot 的恢复材料
 - 恢复被影响的文件或目录
-- 导出可读 proof 日志
+- 面向单个会话导出可读 proof 日志
 - 在本地或 EVM 后端上校验 proof 字段
+- 在统一 UI 中查看会话、活动、恢复、proof 和链状态
+
+## 支持平台
+
+- Linux
+- Windows
+- macOS 使用 Unix shell 启动路径
+
+Linux 和 Windows 已经对主监控流程完成验证，包括 setup、service、UI、恢复、proof 导出和本地 EVM bootstrap。
+
+## 仓库结构
+
+- `clawchain/`
+  运行时、监控、恢复、proof、UI、链集成和 agent adapter 逻辑。
+- `assets/`
+  GitHub 展示所用的 logo、图示和 dashboard 截图。
+- `contracts/`
+  本地 EVM 锚定使用的 `CommitmentAnchor.sol` 及 ABI。
+- `scripts/`
+  平台 smoke、EVM smoke 和 adapter 验证辅助脚本。
+- `setup_clawchain.cmd`
+  Windows 一键 setup 入口。
+- `setup_clawchain.sh`
+  Linux/macOS 一键 setup 入口。
+- `DEVELOPER.md`
+  更详细的架构、实现细节和测试文档。
 
 ## 环境要求
 
@@ -109,9 +131,9 @@ bash setup_clawchain.sh 8888
 
 setup 会自动完成这些动作：
 
-1. 停掉旧的 ClawChain service
+1. 停掉当前账号可能存在的旧 service
 2. 创建或刷新账号配置
-3. 尽可能执行本地 EVM bootstrap
+3. 在可用时执行本地 EVM bootstrap
 4. 启动后台 service
 5. 检查 service 状态
 6. 拉起 UI
@@ -141,21 +163,23 @@ http://127.0.0.1:8888
 
 ### 远程 Linux 主机访问
 
-如果你在 SSH 会话里运行 Linux 版 setup，`run_clawchain_ui.sh` 会自动切换成适合远程访问的绑定方式，并打印正确地址。
+如果 setup 是在 SSH 会话中启动的，`run_clawchain_ui.sh` 会自动切换到适合远程访问的绑定方式，并打印正确的浏览器地址。
 
-## 建议先验证的 Claude 流程
+## 第一次完整监控流程
 
-1. 启动一个新的 Claude Code 会话。
+### Codex 或 Claude Code
+
+1. 启动一个新的 Agent 会话。
 2. 打开 ClawChain UI。
 3. 点击 `Join Monitor`。
-4. 后续只在 ClawChain 接管后的 terminal 中继续操作，不要回到原始裸 terminal。
+4. 后续只在 ClawChain 接管后的 terminal 中继续操作。
 5. 执行一次删除类高危操作。
-6. 在 history 中确认它被记录。
-7. 运行 `Restore`。
-8. 导出 proof。
+6. 回到 UI 确认这次操作出现在 history 中。
+7. 点击 `Restore`。
+8. 导出 proof 日志。
 9. 如果本地链已经 bootstrap，确认 proof 中出现 EVM 相关字段。
 
-对一份成功上链的 proof，通常应该看到：
+对一份成功上链的 proof，通常应该看到这些字段：
 
 - `anchor_backend: "evm:31337"`
 - `anchor_mode: "evm-anchored"`
@@ -207,23 +231,84 @@ powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_windows_smoke.ps1 --bootstrap-local-evm
 ```
 
-## 仓库结构
+### EVM smoke
 
-- `clawchain/`
-  主运行时代码，包括监控、恢复、proof、UI 和 agent 集成逻辑。
-- `assets/`
-  GitHub 展示用 logo、图示和 dashboard 截图。
-- `contracts/`
-  本地 EVM 锚定使用的 `CommitmentAnchor.sol` 及 ABI。
-- `scripts/`
-  平台 smoke、dangerous-ops 验证和 Claude adapter smoke。
-- `setup_clawchain.cmd`
-  Windows 一键 setup 入口。
-- `setup_clawchain.sh`
-  Linux/macOS 一键 setup 入口。
-- `DEVELOPER.md`
-  更详细的架构、开发和测试文档。
+```bash
+bash scripts/run_evm_smoke.sh
+```
 
-## 分支状态
+## Foundry 说明
 
-这个分支的目标是做隔离集成与验证，把通用 agent-adapter 层先打磨稳定，再回并到主 ClawChain 仓库。
+ClawChain 在所有平台上都优先使用本地 Foundry。
+
+bootstrap 顺序如下：
+
+1. 显式指定的 `anvil` 和 `forge` 路径
+2. 当前账号目录下的托管 Foundry toolchain
+3. 从官方 release 自动下载 Foundry
+4. 可用时再回退到 Docker
+
+### Windows 手动 Foundry 兜底方案
+
+如果 Windows 上的 Foundry 自动下载失败，可以手动安装后重新执行 chain bootstrap。
+
+#### 方式 1：直接下载官方 release 资产
+
+打开 Foundry 最新 release 页面：
+
+- <https://github.com/foundry-rs/foundry/releases/latest>
+
+下载类似下面命名的 Windows 资产：
+
+- `foundry_v<version>_win32_amd64.zip`
+
+解压出 `anvil.exe` 和 `forge.exe`，然后任选一种方式：
+
+- 放到系统 `PATH` 中，或
+- 拷到当前账号的 ClawChain 托管 toolchain 目录
+
+默认托管目录：
+
+```text
+%USERPROFILE%\.clawchain-agent\local-operator\_internal\chain\toolchains\foundry\bin
+```
+
+#### 方式 2：显式配置二进制路径
+
+```bat
+set CLAWCHAIN_ANVIL_PATH=C:\path\to\anvil.exe
+set CLAWCHAIN_FORGE_PATH=C:\path\to\forge.exe
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
+```
+
+如果 bootstrap 仍然失败，可以直接运行：
+
+```bat
+python -m clawchain.agent_proxy_cli chain-connect local-operator --bootstrap-local-evm
+```
+
+然后检查 JSON 输出中的这些诊断字段：
+
+- `bootstrap_diagnostics.anvil_path`
+- `bootstrap_diagnostics.forge_path`
+- `bootstrap_diagnostics.managed_foundry_bin_dir`
+- `bootstrap_diagnostics.managed_foundry_bin_contents`
+- `bootstrap_diagnostics.managed_foundry_install_error`
+
+## Proof 预期
+
+对一份新鲜上链的 session proof，通常应该满足：
+
+- `format = clawchain-proof-log.v2`
+- `exported_at` 是完整 ISO 8601 时间戳
+- `session.status = monitored`
+- snapshot 路径位于 `recovery-vault/recovery-snapshots`
+- 恢复后的操作会显示 `restored = true`
+- `proof_cards[].anchor_backend = evm:31337`
+- `proof_cards[].anchor_mode = evm-anchored`
+- `proof_cards[].anchor_status = confirmed`
+
+## 进一步阅读
+
+- [README.md](README.md)
+- [DEVELOPER.md](DEVELOPER.md)

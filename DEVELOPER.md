@@ -1,27 +1,30 @@
 # ClawChain Developer Guide
 
-This guide is for contributors working in the isolated `ClawChain_for_gemini_and_claude` integration branch.
+This document is for contributors who need to modify ClawChain runtime behavior, UI flows, proof export, chain integration, or cross-platform validation.
 
-Unlike the main repository, this branch is intentionally focused on one architectural goal: turning ClawChain from a Codex-first integration into a reusable shell-agent control layer that can support multiple CLI agents without copying agent-specific launcher logic.
+README is user-facing and deployment-oriented. This file is the engineering reference.
 
-README stays GitHub-facing and deployment-oriented. This file is the detailed engineering and validation reference.
+## Scope
 
-## Branch Purpose
+Use this guide when you need detailed information about:
 
-Use this branch when you need to:
+- repository architecture
+- the generalized agent-adapter model
+- Codex and Claude Code runtime behavior
+- setup and bootstrap internals
+- proof export expectations
+- cross-platform validation and debugging
 
-- extend the generalized agent-adapter layer
-- validate Claude Code integration without risking the main repository
-- regression-check Codex after adapter refactors
-- test setup, chain bootstrap, UI, proof export, and restore behavior across Linux and Windows
-- prepare a clean merge back into the main ClawChain project
+## Current Support Model
 
-Current branch status:
+ClawChain currently has two validated agent paths:
 
-- Codex remains available and has been regression-checked after the adapter refactor.
-- Claude Code has been integrated on top of the shared shell-agent adapter path.
-- Claude end-to-end validation has passed for `Join Monitor -> delete -> Restore -> proof -> verify`.
-- Gemini CLI is not integrated yet in this branch.
+- Codex
+  Preserved through the existing Codex rollout path.
+- Claude Code
+  Integrated through the shared shell-agent adapter path.
+
+The runtime is structured so future shell-style agents can be added by extending the profile model instead of duplicating launcher logic.
 
 ## Recommended Environment
 
@@ -33,7 +36,7 @@ Current branch status:
 Useful optional tools:
 
 - Foundry: `anvil`, `forge`
-- Docker as a secondary fallback only
+- Docker as a fallback only
 - tmux on Linux
 - Claude Code installed and authenticated for real CLI validation
 
@@ -42,7 +45,7 @@ Useful optional tools:
 ### Adapter and runtime modules
 
 - `clawchain/agent_profiles.py`
-  Agent profile registry. This is the first place to extend when adding a new shell-style agent.
+  Agent profile registry. Extend this first when adding a new shell-style agent.
 - `clawchain/shell_agent_integration.py`
   Shared launcher, resume, handoff, environment, and shim generation for shell agents.
 - `clawchain/host_monitor.py`
@@ -83,7 +86,7 @@ Useful optional tools:
 ### Validation scripts
 
 - `scripts/smoke_claude_adapter.py`
-  Claude-oriented adapter smoke for the generalized shell-agent path.
+  Claude-oriented adapter smoke.
 - `scripts/platform_smoke.py`
   Cross-platform setup/service/proof smoke driver.
 - `scripts/run_linux_smoke.sh`
@@ -91,19 +94,19 @@ Useful optional tools:
 - `scripts/run_windows_smoke.cmd`
 - `scripts/run_evm_smoke.sh`
 
-## Runtime Model In This Branch
+## Runtime Model
 
-ClawChain in this branch should be understood as two execution families sharing one recovery, proof, and chain backend.
+ClawChain can be understood as two execution families sharing one recovery, proof, and chain backend.
 
 ### 1. Codex rollout path
 
-Codex still keeps its dedicated rollout monitoring path.
+Codex still uses a dedicated rollout monitoring path.
 
 Use this path when:
 
 - you need existing Codex behavior preserved
-- the agent profile uses `watcher_kind = codex-rollout`
-- you are checking that adapter refactors did not regress Codex monitoring
+- the profile uses `watcher_kind = codex-rollout`
+- you are regression-checking shared runtime changes against Codex
 
 ### 2. Generalized shell-agent path
 
@@ -112,17 +115,19 @@ Claude Code is the first validated user of the shared shell-agent path.
 This path is responsible for:
 
 - launcher generation
-- resume and handoff command construction
+- controlled resume and handoff
 - environment injection
 - dangerous command shims
 - managed terminal detection
 - mixed native/managed session warnings
 
-The design target is that future agents should be added by registering a new profile in `agent_profiles.py` and reusing `shell_agent_integration.py`, not by cloning the old Codex wiring.
+Design target:
+
+- future shell-style agents should be added by extending `agent_profiles.py`
+- shared launcher logic should stay in `shell_agent_integration.py`
+- Codex-only rollout assumptions should not leak into the shared adapter path
 
 ## Adapter Design Rules
-
-When extending this branch, keep these rules intact.
 
 ### Agent profiles own agent identity
 
@@ -134,9 +139,9 @@ A profile should define:
 - resume behavior
 - handoff behavior
 - watcher kind
-- any agent-specific session-id extraction rules
+- agent-specific session-id extraction rules when needed
 
-Do not hide agent-specific assumptions deep inside `ui_server.py` or `agent_proxy_cli.py` if they belong in the profile model.
+Do not bury agent-specific identity assumptions inside `ui_server.py` or `agent_proxy_cli.py` if they belong in the profile layer.
 
 ### Shared shell-agent integration owns controlled execution
 
@@ -152,15 +157,15 @@ Do not fork the launcher flow per agent unless the shared path cannot express th
 
 ### Codex-specific behavior stays isolated
 
-If a change is only needed for Codex rollout capture, keep it in the Codex-specific modules. Do not pollute the shared shell-agent path with Codex-only rollout assumptions.
+If a change is only needed for Codex rollout capture, keep it inside the Codex-specific modules.
 
 ## Claude Code Notes
 
-Claude integration in this branch has a few important behavior rules.
+Claude integration has a few critical behavior rules.
 
 ### Session identity
 
-Claude session matching prefers real Claude session identifiers instead of path-based placeholders.
+Claude session matching should prefer real Claude session identifiers instead of path-based placeholders.
 
 Expected sources include:
 
@@ -170,7 +175,7 @@ Expected sources include:
 Goal:
 
 - prefer a real `resume:<session-id>` identity when available
-- avoid incorrectly collapsing different Claude sessions into the same `path:*` fingerprint
+- avoid collapsing unrelated Claude sessions into the same `path:*` fingerprint
 
 ### Managed vs native terminals
 
@@ -179,9 +184,7 @@ Claude can easily end up with both:
 - the original native terminal
 - the ClawChain-managed terminal after `Join Monitor`
 
-That means this branch must preserve clear mixed-session handling. A successful `Join Monitor` does not make commands typed in the old native terminal recoverable.
-
-UI and monitoring logic should make this visible rather than hiding it.
+A successful `Join Monitor` does not make commands typed in the old native terminal recoverable. UI and monitoring logic must make this visible.
 
 ### Join Monitor expectations
 
@@ -227,24 +230,24 @@ Preferred order:
 1. explicit `anvil_path` and `forge_path`
 2. managed toolchain under account-local `toolchains/foundry/bin`
 3. automatic Foundry download from official releases
-4. optional Docker fallback where still supported
+4. optional Docker fallback where supported
 
 Important principle:
 
-- Docker is not the preferred Windows path.
-- Local Foundry is the intended Windows path.
+- Docker is not the preferred Windows path
+- local Foundry is the intended primary path on all platforms
 
 ## Proof Export Expectations
 
-Current proof export expectations in this branch:
+Current proof export expectations:
 
 - `exported_at` is full ISO 8601, not time-only
 - `session.evidence.snapshot_locations` points into `recovery-vault/recovery-snapshots/...`
 - `session_dangerous_operations[].target_root` matches the absolute `proof_cards[].target_root`
 - chain state is reflected back into exported proof evidence when available
-- fresh Claude and Codex proofs should show the same exported structure once anchored
+- fresh Claude and Codex proofs should have the same exported structure once anchored
 
-If the problem is presentation-only, prefer export normalization over changing the recovery model.
+If the issue is presentation-only, prefer export normalization over changing the recovery model.
 
 ## Fast Validation Commands
 
@@ -290,7 +293,7 @@ bash scripts/run_evm_smoke.sh
 
 ### Codex regression flow
 
-Use this when changing shared adapter infrastructure to ensure Codex did not regress.
+Use this when changing shared runtime infrastructure to ensure Codex did not regress.
 
 1. Run setup for the current platform.
 2. Confirm `chain-status local-operator` returns `ok: true`.
@@ -390,14 +393,14 @@ Focus on:
 - UI `session_ref` generation for non-concrete rows
 - mixed native/managed rows collapsing into the same card
 
-## Merge-Back Checklist
+## Maintenance Checklist
 
-Do not merge this branch back into the main repository until all of the following are true:
+Before publishing significant runtime changes, confirm all of the following:
 
 - Codex regression flow passes
 - Claude acceptance flow passes
 - Windows setup with chain bootstrap passes
 - Linux setup with chain bootstrap passes
-- proof export shape matches mainline expectations
-- README and DEVELOPER docs are updated together
+- proof export shape remains stable
+- README, README.zh-CN, and DEVELOPER docs are updated together
 - no Claude-specific workaround has leaked into Codex-only rollout logic
