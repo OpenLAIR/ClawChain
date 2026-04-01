@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo/ClawChain.png" alt="ClawChain logo" width="148">
   <h1>ClawChain</h1>
-  <p><strong>面向高权限 AI Coding Agent 的安全、可恢复、可追溯运行时控制层。</strong></p>
+  <p><strong>面向高权限 AI Agent 的安全、可恢复、可追溯运行时控制层。</strong></p>
   <p>
     ClawChain 将原本不透明的 Agent 会话转化为可监控、可恢复、可导出 proof、可链上校验的执行流程。
   </p>

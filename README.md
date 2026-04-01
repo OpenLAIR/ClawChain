@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo/ClawChain.png" alt="ClawChain logo" width="148">
   <h1>ClawChain</h1>
-  <p><strong>Secure, recoverable, and traceable runtime control for high-privilege AI coding agents.</strong></p>
+  <p><strong>Secure, recoverable, and traceable runtime control for high-privilege AI agents.</strong></p>
   <p>
     ClawChain turns opaque agent sessions into monitored execution flows with controlled handoff, snapshot-backed recovery, readable proof export, and EVM-verifiable evidence.
   </p>
